@@ -1,6 +1,6 @@
-module github.com/TangSengDaoDao/TangSengDaoDaoServerLib
+module github.com/jianyu-im/JianYuServerLib
 
-go 1.20
+go 1.22.3
 
 require (
 	github.com/RichardKnop/machinery/v2 v2.0.10

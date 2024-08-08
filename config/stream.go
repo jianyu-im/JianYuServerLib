@@ -3,8 +3,8 @@ package config
 import (
 	"errors"
 
-	"github.com/TangSengDaoDao/TangSengDaoDaoServerLib/pkg/network"
-	"github.com/TangSengDaoDao/TangSengDaoDaoServerLib/pkg/util"
+	"github.com/jianyu-im/JianYuServerLib/pkg/network"
+	"github.com/jianyu-im/JianYuServerLib/pkg/util"
 )
 
 // IMStreamStart 消息流开始

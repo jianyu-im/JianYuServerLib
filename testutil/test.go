@@ -3,9 +3,9 @@ package testutil
 import (
 	// "github.com/TangSengDaoDao/TangSengDaoDaoServer/modules/base/event"
 
-	"github.com/TangSengDaoDao/TangSengDaoDaoServerLib/config"
-	"github.com/TangSengDaoDao/TangSengDaoDaoServerLib/module"
-	"github.com/TangSengDaoDao/TangSengDaoDaoServerLib/server"
+	"github.com/jianyu-im/JianYuServerLib/config"
+	"github.com/jianyu-im/JianYuServerLib/module"
+	"github.com/jianyu-im/JianYuServerLib/server"
 )
 
 // UID 测试用户ID

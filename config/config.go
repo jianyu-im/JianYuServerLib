@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/TangSengDaoDao/TangSengDaoDaoServerLib/pkg/util"
+	"github.com/jianyu-im/JianYuServerLib/pkg/util"
 	"github.com/spf13/cast"
 	"github.com/spf13/viper"
 	"go.uber.org/zap/zapcore"

@@ -4,7 +4,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/TangSengDaoDao/TangSengDaoDaoServerLib/pkg/redis"
+	"github.com/jianyu-im/JianYuServerLib/pkg/redis"
 )
 
 // RedisCache redis缓存
