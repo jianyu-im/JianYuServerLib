@@ -120,6 +120,10 @@ type Config struct {
 		TokenExpire                 time.Duration // token失效时间
 		NameCacheExpire             time.Duration // 名字缓存过期时间
 	}
+	// ---------- ip2region配置 ----------
+	Ip2region struct {
+		DbPath string //db文件路径
+	}
 	// ---------- 系统账户设置 ----------
 	Account struct {
 		SystemUID       string //系统账号uid
@@ -188,6 +192,14 @@ type Config struct {
 		ServiceKey   string // owt的服务key （用户访问后台的api）
 		RoomMaxCount int    // 房间最大参与人数
 	}
+
+	// ---------- livekit ----------
+	Livekit struct {
+		URL    string
+		Key    string
+		Secret string
+	}
+
 	Register struct {
 		Off           bool // 是否关闭注册
 		OnlyChina     bool // 是否仅仅中国手机号可以注册
@@ -273,17 +285,17 @@ func New() *Config {
 	cfg := &Config{
 		// ---------- 基础配置 ----------
 		Mode:                        ReleaseMode,
-		AppID:                       "tangsengdaodao",
-		AppName:                     "唐僧叨叨",
-		Addr:                        ":8090",
-		GRPCAddr:                    "0.0.0.0:6979",
+		AppID:                       "jianyuim",
+		AppName:                     "简语",
+		Addr:                        ":8000",
+		GRPCAddr:                    ":9009",
 		PhoneSearchOff:              false,
 		OnlineStatusOn:              true,
 		GroupUpgradeWhenMemberCount: 1000,
 		MessageSaveAcrossDevice:     true,
 		EventPoolSize:               100,
 		WelcomeMessage:              "欢迎使用{{appName}}",
-		RootDir:                     "tsdddata",
+		RootDir:                     "jydata",
 		AdminPwd:                    "",
 		// ---------- 外网配置 ----------
 		External: struct {
@@ -321,6 +333,8 @@ func New() *Config {
 		}{
 			NodeID: 1,
 		},
+		// ---------- ip2region配置 ----------
+		Ip2region: struct{ DbPath string }{DbPath: "configs/xdb/ip2region.xdb"},
 		// ---------- 缓存配置 ----------
 		Cache: struct {
 			TokenCachePrefix            string
@@ -460,7 +474,7 @@ func New() *Config {
 			PushPoolSize:    100,
 			APNS: APNSPush{
 				Dev:      true,
-				Topic:    "com.xinbida.tangsengdaodao",
+				Topic:    "com.jianyu.im",
 				Password: "123456",
 			},
 		},
@@ -497,20 +511,20 @@ func (c *Config) ConfigureWithViper(vp *viper.Viper) {
 	c.vp = vp
 	intranetIP := getIntranetIP() // 内网IP
 	// #################### 基础配置 ####################
-	c.Mode = Mode(c.getString("mode", string(DebugMode)))
+	c.Mode = Mode(c.getString("application.environment", string(DebugMode)))
 	c.AppID = c.getString("appID", c.AppID)
-	c.AppName = c.getString("appName", c.AppName)
+	c.AppName = c.getString("application.appName", c.AppName)
 	c.RootDir = c.getString("rootDir", c.RootDir)
 	c.Version = c.getString("version", c.Version)
-	c.Addr = c.getString("addr", c.Addr)
-	c.GRPCAddr = c.getString("grpcAddr", c.GRPCAddr)
+	c.Addr = c.getString("server.http.port", c.Addr)
+	c.GRPCAddr = c.getString("server.grpc.port", "0.0.0.0"+c.GRPCAddr)
 	c.SSLAddr = c.getString("sslAddr", c.SSLAddr)
 	c.MessageSaveAcrossDevice = c.getBool("messageSaveAcrossDevice", c.MessageSaveAcrossDevice)
 	c.WelcomeMessage = c.getString("welcomeMessage", c.WelcomeMessage)
 	if strings.TrimSpace(c.WelcomeMessage) != "" {
 		c.WelcomeMessage = strings.ReplaceAll(c.WelcomeMessage, "{{appName}}", c.AppName)
 	}
-	c.PhoneSearchOff = c.getBool("phoneSearchOff", c.PhoneSearchOff)
+	c.PhoneSearchOff = c.getBool("application.phoneSearchOff", c.PhoneSearchOff)
 	c.OnlineStatusOn = c.getBool("onlineStatusOn", c.OnlineStatusOn)
 	c.GroupUpgradeWhenMemberCount = c.getInt("groupUpgradeWhenMemberCount", c.GroupUpgradeWhenMemberCount)
 	c.EventPoolSize = c.getInt64("eventPoolSize", c.EventPoolSize)
@@ -540,13 +554,13 @@ func (c *Config) ConfigureWithViper(vp *viper.Viper) {
 	// #################### 配置日志 ####################
 	c.configureLog()
 	// #################### db ####################
-	c.DB.MySQLAddr = c.getString("db.mysqlAddr", c.DB.MySQLAddr)
-	c.DB.MySQLMaxOpenConns = c.getInt("db.mysqlMaxOpenConns", c.DB.MySQLMaxOpenConns)
-	c.DB.MySQLMaxIdleConns = c.getInt("db.mysqlMaxIdleConns", c.DB.MySQLMaxIdleConns)
+	c.DB.MySQLAddr = c.getString("database.default.dns", c.DB.MySQLAddr)
+	c.DB.MySQLMaxOpenConns = c.getInt("database.default.maxOpenConns", c.DB.MySQLMaxOpenConns)
+	c.DB.MySQLMaxIdleConns = c.getInt("database.default.maxIdleConns", c.DB.MySQLMaxIdleConns)
 	c.DB.MySQLConnMaxLifetime = c.getDuration("db.mysqlConnMaxLifetime", c.DB.MySQLConnMaxLifetime)
 	c.DB.Migration = c.getBool("db.migration", c.DB.Migration)
-	c.DB.RedisAddr = c.getString("db.redisAddr", c.DB.RedisAddr)
-	c.DB.RedisPass = c.getString("db.redisPass", c.DB.RedisPass)
+	c.DB.RedisAddr = c.getString("redis.addr", c.DB.RedisAddr)
+	c.DB.RedisPass = c.getString("redis.password", c.DB.RedisPass)
 	c.DB.AsynctaskRedisAddr = c.getString("db.asynctaskRedisAddr", c.DB.AsynctaskRedisAddr)
 
 	//#################### cluster ####################
@@ -622,8 +636,8 @@ func (c *Config) ConfigureWithViper(vp *viper.Viper) {
 	c.AliyunInternationalSMS.SignName = c.getString("aliyunInternationalSMS.signName", c.AliyunInternationalSMS.SignName)
 
 	//#################### 悟空IM ####################
-	c.WuKongIM.APIURL = c.getString("wukongIM.apiURL", c.WuKongIM.APIURL)
-	c.WuKongIM.ManagerToken = c.getString("wukongIM.managerToken", c.WuKongIM.ManagerToken)
+	c.WuKongIM.APIURL = c.getString("im.apiURL", c.WuKongIM.APIURL)
+	c.WuKongIM.ManagerToken = c.getString("im.token", c.WuKongIM.ManagerToken)
 
 	//#################### 头像 ####################
 	c.Avatar.Default = c.getString("avatar.default", c.Avatar.Default)
@@ -655,6 +669,12 @@ func (c *Config) ConfigureWithViper(vp *viper.Viper) {
 	c.OWT.URL = c.getString("owt.url", c.OWT.URL)
 	c.OWT.ServiceID = c.getString("owt.serviceID", c.OWT.ServiceID)
 	c.OWT.ServiceKey = c.getString("owt.serviceKey", c.OWT.ServiceKey)
+	c.OWT.RoomMaxCount = c.getInt("owt.roomMaxCount", c.OWT.RoomMaxCount)
+
+	//#################### rtc livekit ####################
+	c.Livekit.URL = c.getString("sfu.url", c.Livekit.URL)
+	c.Livekit.Key = c.getString("sfu.key", c.Livekit.Key)
+	c.Livekit.Secret = c.getString("sfu.secret", c.Livekit.Secret)
 	c.OWT.RoomMaxCount = c.getInt("owt.roomMaxCount", c.OWT.RoomMaxCount)
 
 	//#################### register ####################
