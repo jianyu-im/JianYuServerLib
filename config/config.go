@@ -626,10 +626,13 @@ func (c *Config) ConfigureWithViper(vp *viper.Viper) {
 	c.UniSMS.AccessKeySecret = c.getString("uniSMS.accessKeySecret", c.UniSMS.AccessKeySecret)
 	c.UniSMS.TemplateId = c.getString("uniSMS.templateId", c.UniSMS.TemplateId)
 	// AliyunSMS
-	c.AliyunSMS.AccessKeyID = c.getString("aliyunSMS.accessKeyID", c.AliyunSMS.AccessKeyID)
-	c.AliyunSMS.AccessSecret = c.getString("aliyunSMS.accessSecret", c.AliyunSMS.AccessSecret)
-	c.AliyunSMS.TemplateCode = c.getString("aliyunSMS.templateCode", c.AliyunSMS.TemplateCode)
+	c.AliyunSMS.AccessKeyID = c.getString("aliyunSMS.accessKeyId", c.AliyunSMS.AccessKeyID)
+	c.AliyunSMS.AccessKeySecret = c.getString("aliyunSMS.accessKeySecret", c.AliyunSMS.AccessKeySecret)
 	c.AliyunSMS.SignName = c.getString("aliyunSMS.signName", c.AliyunSMS.SignName)
+	c.AliyunSMS.UserRegisterTemplateCode = c.getString("aliyunSMS.userRegisterTemplateCode", c.AliyunSMS.UserRegisterTemplateCode)
+	c.AliyunSMS.UserForgetPwdTemplateCode = c.getString("aliyunSMS.userForgetPwdTemplateCode", c.AliyunSMS.UserForgetPwdTemplateCode)
+	c.AliyunSMS.UserLoginTemplateCode = c.getString("aliyunSMS.userLoginTemplateCode", c.AliyunSMS.UserLoginTemplateCode)
+	c.AliyunSMS.UserIdentityTemplateCode = c.getString("aliyunSMS.userIdentityTemplateCode", c.AliyunSMS.UserIdentityTemplateCode)
 	// AliyunInternationalSMS
 	c.AliyunInternationalSMS.AccessKeyID = c.getString("aliyunInternationalSMS.accessKeyID", c.AliyunInternationalSMS.AccessKeyID)
 	c.AliyunInternationalSMS.AccessSecret = c.getString("aliyunInternationalSMS.accessSecret", c.AliyunInternationalSMS.AccessSecret)
@@ -969,10 +972,13 @@ const (
 
 // AliyunSMSConfig 阿里云短信
 type AliyunSMSConfig struct {
-	AccessKeyID  string // aliyun的AccessKeyID
-	AccessSecret string // aliyun的AccessSecret
-	TemplateCode string // aliyun的短信模版
-	SignName     string // 签名
+	AccessKeyID               string // aliyun的AccessKeyID
+	AccessKeySecret           string // aliyun的AccessSecret
+	SignName                  string // 签名
+	UserRegisterTemplateCode  string //用户注册短信模版code
+	UserForgetPwdTemplateCode string //用户修改密码短信模版code
+	UserLoginTemplateCode     string //用户登录确认短信模版code
+	UserIdentityTemplateCode  string //用户身份验证短信模版code
 }
 
 // aliyun oss
