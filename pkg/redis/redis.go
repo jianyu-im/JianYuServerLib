@@ -432,6 +432,5 @@ func (rc *Conn) UnLock(key string) error {
 	if err != nil {
 		return err
 	}
-
 	return nil
 }
