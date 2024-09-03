@@ -408,3 +408,30 @@ func (rc *Conn) LPUSH(key string, values ...interface{}) (int64, error) {
 func (rc *Conn) GetKeys(key string) ([]string, error) {
 	return rc.client.Keys(key).Result()
 }
+
+func (rc *Conn) Lock(key string, duration time.Duration) error {
+
+	if err := rc.client.SetNX(key, "1", duration).Err(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (rc *Conn) UnLock(key string) error {
+	val, err := rc.client.Get(key).Result()
+	if err != nil {
+		return err
+	}
+
+	if val == "" {
+		return nil
+	}
+
+	_, err = rc.client.Del(key).Result()
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
