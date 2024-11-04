@@ -409,9 +409,9 @@ func (rc *Conn) GetKeys(key string) ([]string, error) {
 	return rc.client.Keys(key).Result()
 }
 
-func (rc *Conn) Lock(key string, duration time.Duration) error {
+func (rc *Conn) Lock(key string, value string, duration time.Duration) error {
 
-	if err := rc.client.SetNX(key, "1", duration).Err(); err != nil {
+	if err := rc.client.SetNX(key, value, duration).Err(); err != nil {
 		return err
 	}
 

@@ -19,17 +19,17 @@ func Setup(ctx *config.Context) error {
 	ms := register.GetModules(ctx)
 
 	// 初始化SQL
-	var sqlfss []*register.SQLFS
-	for _, m := range ms {
-		if m.SQLDir != nil {
-			sqlfss = append(sqlfss, m.SQLDir)
-		}
-
-	}
-	err := executeSQL(sqlfss, ctx.DB())
-	if err != nil {
-		return err
-	}
+	//var sqlfss []*register.SQLFS
+	//for _, m := range ms {
+	//	if m.SQLDir != nil {
+	//		sqlfss = append(sqlfss, m.SQLDir)
+	//	}
+	//
+	//}
+	//err := executeSQL(sqlfss, ctx.DB())
+	//if err != nil {
+	//	return err
+	//}
 	// 注册api
 	for _, m := range ms {
 		if m.SetupAPI != nil {
