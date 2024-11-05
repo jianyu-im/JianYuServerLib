@@ -31,6 +31,10 @@ const (
 	Card ContentType = 7
 	// File 文件
 	File ContentType = 8
+	//RedPack 红包
+	RedPack ContentType = 9
+	//Transfer 转账
+	Transfer ContentType = 10
 	// MultipleForward 合并转发
 	MultipleForward ContentType = 11
 	// VectorSticker 矢量表情
@@ -74,6 +78,10 @@ const (
 	GroupTransferGrouper ContentType = 1008
 	// GroupMemberInvite 群成员邀请
 	GroupMemberInvite ContentType = 1009
+
+	RedPackOpen ContentType = 1011 // 红包领取tip（由服务端下发）
+
+	TradeSystemNotify = 1012 // 交易系统通知（比如：转账退回，红包退回）
 	// GroupMemberBeRemove  群成员被移除（被踢）
 	GroupMemberBeRemove ContentType = 1020
 	// GroupMemberBeRemove 群成员主动退出群聊
