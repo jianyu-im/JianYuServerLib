@@ -147,6 +147,7 @@ type Config struct {
 	UniSMS                 UnismsConfig                 // unisms https://unisms.apistd.com/
 	AliyunSMS              AliyunSMSConfig              // aliyun sms
 	AliyunInternationalSMS AliyunInternationalSMSConfig // 阿里云国际短信
+	JdSMS                  JdSMSConfig                  //jdsms
 
 	// ---------- 悟空IM ----------
 	WuKongIM struct {
@@ -620,6 +621,12 @@ func (c *Config) ConfigureWithViper(vp *viper.Viper) {
 	//#################### 短信服务 ####################
 	c.SMSCode = c.getString("smsCode", c.SMSCode)
 	c.SMSProvider = SMSProvider(c.getString("smsProvider", string(c.SMSProvider)))
+	//JdSMS
+	c.JdSMS.SpCode = c.getString("jdSMS.spCode", c.JdSMS.SpCode)
+	c.JdSMS.LoginName = c.getString("jdSMS.loginName", c.JdSMS.LoginName)
+	c.JdSMS.Password = c.getString("jdSMS.passWord", c.JdSMS.Password)
+	c.JdSMS.MessageContent = c.getString("jdSMS.messageContent", c.JdSMS.MessageContent)
+	c.JdSMS.ApiUrl = c.getString("jdSMS.apiUrl", c.JdSMS.ApiUrl)
 	// UniSMS
 	c.UniSMS.AccessKeyID = c.getString("uniSMS.accessKeyID", c.UniSMS.AccessKeyID)
 	c.UniSMS.Signature = c.getString("uniSMS.signature", c.UniSMS.Signature)
@@ -967,7 +974,8 @@ type SMSProvider string
 const (
 	// SMSProviderAliyun aliyun
 	SMSProviderAliyun SMSProvider = "aliyun"
-	SMSProviderUnisms SMSProvider = "unisms" // 联合短信(https://unisms.apistd.com/docs/api/send/)
+	SMSProviderUniSms SMSProvider = "unisms" // 联合短信(https://unisms.apistd.com/docs/api/send/)
+	SMSProviderJdSms  SMSProvider = "jdsms"
 )
 
 // AliyunSMSConfig 阿里云短信
@@ -1007,6 +1015,15 @@ type QiniuConfig struct {
 	BucketName string
 	AccessKey  string
 	SecretKey  string
+}
+
+// JdSMSConfig jdSMS短信
+type JdSMSConfig struct {
+	SpCode         string
+	LoginName      string
+	Password       string
+	MessageContent string
+	ApiUrl         string
 }
 
 // UnismsConfig unisms短信
