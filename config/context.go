@@ -203,8 +203,11 @@ func (c *Context) AddEventListener(event string, listener EventListener) {
 	if listeners == nil {
 		listeners = make([]EventListener, 0)
 	}
-	listeners = append(listeners, listener)
-	eventListeners[event] = listeners
+	//校验事件是否已存在
+	if len(c.GetEventListeners(event)) < 1 {
+		listeners = append(listeners, listener)
+		eventListeners[event] = listeners
+	}
 }
 
 // GetEventListeners 获取某个事件
