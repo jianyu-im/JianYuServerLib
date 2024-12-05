@@ -208,6 +208,7 @@ func (c *Context) AddEventListener(event string, listener EventListener) {
 		listeners = append(listeners, listener)
 		eventListeners[event] = listeners
 	}
+
 }
 
 // GetEventListeners 获取某个事件
