@@ -203,6 +203,13 @@ func (c *Context) AddEventListener(event string, listener EventListener) {
 	if listeners == nil {
 		listeners = make([]EventListener, 0)
 	}
+}
+
+func (c *Context) JyAddEventListener(event string, listener EventListener) {
+	listeners := eventListeners[event]
+	if listeners == nil {
+		listeners = make([]EventListener, 0)
+	}
 
 	//校验事件是否已存在
 	if len(c.GetEventListeners(event)) < 1 {
