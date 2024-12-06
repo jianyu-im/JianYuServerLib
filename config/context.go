@@ -203,6 +203,8 @@ func (c *Context) AddEventListener(event string, listener EventListener) {
 	if listeners == nil {
 		listeners = make([]EventListener, 0)
 	}
+	listeners = append(listeners, listener)
+	eventListeners[event] = listeners
 }
 
 func (c *Context) JyAddEventListener(event string, listener EventListener) {
