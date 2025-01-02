@@ -3,6 +3,7 @@ package errors
 import (
 	"errors"
 	"fmt"
+	"github.com/jianyu-im/JianYuServerLib/common"
 	"github.com/jianyu-im/JianYuServerLib/pkg/internal/httputil"
 	"github.com/jianyu-im/JianYuServerLib/pkg/wkhttp"
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
@@ -26,15 +27,11 @@ type JyError struct {
 }
 
 func (j *JyError) ToError(ctx *wkhttp.Context) error {
-	zone := "cn"
-	if zone != ctx.GetHeader("zone") {
-		zone = "en"
-	}
+	zone := common.AppLanguage(ctx.GetHeader("language"))
 	switch zone {
-	case "cn":
+	case common.ChinaLanguage:
 		return fmt.Errorf(j.CnMessage)
-
-	case "en":
+	case common.EnglishLanguage:
 		return fmt.Errorf(j.EnMessage)
 	default:
 		return fmt.Errorf(j.CnMessage)
