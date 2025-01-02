@@ -317,3 +317,14 @@ const (
 	RTCResultTypeMissed RTCResultType = 2 // 未接听
 	RTCResultTypeRefuse RTCResultType = 3 // 拒绝接听
 )
+
+type AppLanguage string
+
+const (
+	ChinaLanguage   AppLanguage = "cn"
+	EnglishLanguage AppLanguage = "en"
+)
+
+func (a AppLanguage) ToString() string {
+	return string(a)
+}
