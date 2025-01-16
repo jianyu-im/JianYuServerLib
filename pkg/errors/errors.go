@@ -27,8 +27,8 @@ type JyError struct {
 }
 
 func (j *JyError) ToError(ctx *wkhttp.Context) error {
-	zone := common.AppLanguage(ctx.GetHeader("language"))
-	switch zone {
+	lang := common.AppLanguage(ctx.GetHeader("language"))
+	switch lang {
 	case common.ChinaLanguage:
 		return fmt.Errorf(j.CnMessage)
 	case common.EnglishLanguage:

@@ -193,14 +193,17 @@ type Config struct {
 		ServiceKey   string // owt的服务key （用户访问后台的api）
 		RoomMaxCount int    // 房间最大参与人数
 	}
-
 	// ---------- livekit ----------
 	Livekit struct {
-		URL    string
-		Key    string
-		Secret string
+		Off                  bool   // 是否关闭livekit功能
+		URL                  string // livekit连接地址 wss://xx.xx.xx.xx:7880
+		Key                  string // livekit api key
+		Secret               string // livekit api secret
+		InviteTimeoutSeconds int    // 邀请超时时间（单位秒）
+		RoomMaxCount         int    // 房间最大参与人数
 	}
 
+	// ---------- 注册 ----------
 	Register struct {
 		Off           bool // 是否关闭注册
 		OnlyChina     bool // 是否仅仅中国手机号可以注册
@@ -445,6 +448,19 @@ func New() *Config {
 		}{
 			RoomMaxCount: 9,
 		},
+		// ---------- livekit  ----------
+		Livekit: struct {
+			Off                  bool
+			URL                  string
+			Key                  string
+			Secret               string
+			InviteTimeoutSeconds int
+			RoomMaxCount         int
+		}{
+			Off:                  false,
+			InviteTimeoutSeconds: 60,
+			RoomMaxCount:         9,
+		},
 		// ---------- 好友设置  --------
 
 		Friend: struct {
@@ -687,11 +703,12 @@ func (c *Config) ConfigureWithViper(vp *viper.Viper) {
 	c.OWT.RoomMaxCount = c.getInt("owt.roomMaxCount", c.OWT.RoomMaxCount)
 
 	//#################### rtc livekit ####################
+	c.Livekit.Off = c.getBool("livekit.off", c.Livekit.Off)
 	c.Livekit.URL = c.getString("sfu.url", c.Livekit.URL)
 	c.Livekit.Key = c.getString("sfu.key", c.Livekit.Key)
 	c.Livekit.Secret = c.getString("sfu.secret", c.Livekit.Secret)
 	c.OWT.RoomMaxCount = c.getInt("owt.roomMaxCount", c.OWT.RoomMaxCount)
-
+	c.Livekit.InviteTimeoutSeconds = c.getInt("livekit.inviteTimeoutSeconds", c.Livekit.InviteTimeoutSeconds)
 	//#################### register ####################
 	c.Register.Off = c.getBool("register.off", c.Register.Off)
 	c.Register.OnlyChina = c.getBool("register.onlyChina", c.Register.OnlyChina)
