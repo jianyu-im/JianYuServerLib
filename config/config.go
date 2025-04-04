@@ -79,6 +79,11 @@ type Config struct {
 	GroupUpgradeWhenMemberCount int    // 当成员数量大于此配置时 自动升级为超级群 默认为 1000
 	EventPoolSize               int64  // 事件任务池大小
 	AdminPwd                    string // 后台管理默认密码
+	// ---------- SASS服务 ----------
+	Sass struct {
+		Switch      bool   //服务是否开启 true 开启 false关闭
+		CompanyCode string //企业编号
+	}
 	// ---------- 外网配置 ----------
 	External struct {
 		IP          string // 外网IP
@@ -546,7 +551,9 @@ func (c *Config) ConfigureWithViper(vp *viper.Viper) {
 	c.GroupUpgradeWhenMemberCount = c.getInt("groupUpgradeWhenMemberCount", c.GroupUpgradeWhenMemberCount)
 	c.EventPoolSize = c.getInt64("eventPoolSize", c.EventPoolSize)
 	c.AdminPwd = c.getString("adminPwd", c.AdminPwd)
-
+	// #################### SASS服务 ####################
+	c.Sass.Switch = c.getBool("sass.switch", c.Sass.Switch)
+	c.Sass.CompanyCode = c.getString("sass.companyCode", c.Sass.CompanyCode)
 	// #################### 外网配置 ####################
 	c.External.IP = c.getString("external.ip", c.External.IP)
 	if strings.TrimSpace(c.External.IP) == "" { // 没配置外网IP就使用内网IP
@@ -603,9 +610,10 @@ func (c *Config) ConfigureWithViper(vp *viper.Viper) {
 	//#################### 文件服务 ####################
 	c.FileService = FileService(c.getString("fileService", c.FileService.String()))
 	// aliyun oss
+	c.OSS.OssType = c.getString("oss.type", c.OSS.OssType)
 	c.OSS.Endpoint = c.getString("oss.endpoint", c.OSS.Endpoint)
-	c.OSS.BucketURL = c.getString("oss.bucketURL", c.OSS.BucketURL)
-	c.OSS.AccessKeyID = c.getString("oss.accessKeyID", c.OSS.AccessKeyID)
+	c.OSS.BucketURL = c.getString("oss.bucketUrl", c.OSS.BucketURL)
+	c.OSS.AccessKeyID = c.getString("oss.accessKeyId", c.OSS.AccessKeyID)
 	c.OSS.AccessKeySecret = c.getString("oss.accessKeySecret", c.OSS.AccessKeySecret)
 	c.OSS.BucketName = c.getString("oss.bucketName", c.OSS.BucketName)
 	// minio
@@ -1014,6 +1022,7 @@ type AliyunSMSConfig struct {
 
 // aliyun oss
 type OSSConfig struct {
+	OssType         string //类型 minio/qiniu/aliyun/aws
 	Endpoint        string
 	BucketName      string // Bucket名称 比如 tangsengdaodao
 	BucketURL       string // 文件下载地址域名 对应aliyun的Bucket域名

@@ -119,6 +119,11 @@ func (c *Context) GetLoginUID() string {
 	return c.MustGet("uid").(string)
 }
 
+// GetCompanyCode 获取当前企业编号
+func (c *Context) GetCompanyCode() string {
+	return c.MustGet("company_code").(string)
+}
+
 // GetAppID appID
 func (c *Context) GetAppID() string {
 	return c.GetHeader("appid")
@@ -268,16 +273,23 @@ func (l *WKHttp) AuthMiddleware(cache cache.Cache, tokenPrefix string) HandlerFu
 			return
 		}
 		uidAndNames := strings.Split(uidAndName, "@")
-		if len(uidAndNames) < 2 {
+		if len(uidAndNames) < 3 {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
 				"msg": "token有误！",
 			})
 			return
 		}
+		if c.GetHeader("company_code") != uidAndNames[2] {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+				"msg": "企业编号不正确！",
+			})
+			return
+		}
 		c.Set("uid", uidAndNames[0])
 		c.Set("name", uidAndNames[1])
-		if len(uidAndNames) > 2 {
-			c.Set("role", uidAndNames[2])
+		c.Set("company_code", uidAndNames[2])
+		if len(uidAndNames) > 3 {
+			c.Set("role", uidAndNames[4])
 		}
 		c.Next()
 	}
