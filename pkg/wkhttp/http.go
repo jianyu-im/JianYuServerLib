@@ -2,6 +2,7 @@ package wkhttp
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -256,7 +257,6 @@ func (l *WKHttp) handlersToGinHandleFuncs(handlers []HandlerFunc) []gin.HandlerF
 
 // AuthMiddleware 认证中间件
 func (l *WKHttp) AuthMiddleware(cache cache.Cache, tokenPrefix string) HandlerFunc {
-
 	return func(c *Context) {
 		token := c.GetHeader("token")
 		if token == "" {
@@ -280,8 +280,9 @@ func (l *WKHttp) AuthMiddleware(cache cache.Cache, tokenPrefix string) HandlerFu
 			return
 		}
 		if c.GetHeader("companyCode") != uidAndNames[2] {
+			fmt.Println(c.GetHeader("companyCode"), "参数", uidAndNames)
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
-				"msg": "企业编号不正确！",
+				"msg": "Auth-企业编号不正确！",
 			})
 			return
 		}
