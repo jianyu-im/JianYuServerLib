@@ -121,7 +121,7 @@ func (c *Context) GetLoginUID() string {
 
 // GetCompanyCode 获取当前企业编号
 func (c *Context) GetCompanyCode() string {
-	return c.MustGet("company_code").(string)
+	return c.MustGet("companyCode").(string)
 }
 
 // GetAppID appID
@@ -279,7 +279,7 @@ func (l *WKHttp) AuthMiddleware(cache cache.Cache, tokenPrefix string) HandlerFu
 			})
 			return
 		}
-		if c.GetHeader("company_code") != uidAndNames[2] {
+		if c.GetHeader("companyCode") != uidAndNames[2] {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
 				"msg": "企业编号不正确！",
 			})
@@ -287,7 +287,7 @@ func (l *WKHttp) AuthMiddleware(cache cache.Cache, tokenPrefix string) HandlerFu
 		}
 		c.Set("uid", uidAndNames[0])
 		c.Set("name", uidAndNames[1])
-		c.Set("company_code", uidAndNames[2])
+		c.Set("companyCode", uidAndNames[2])
 		if len(uidAndNames) > 3 {
 			c.Set("role", uidAndNames[4])
 		}
