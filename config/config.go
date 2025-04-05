@@ -616,6 +616,7 @@ func (c *Config) ConfigureWithViper(vp *viper.Viper) {
 	c.OSS.AccessKeyID = c.getString("oss.accessKeyId", c.OSS.AccessKeyID)
 	c.OSS.AccessKeySecret = c.getString("oss.accessKeySecret", c.OSS.AccessKeySecret)
 	c.OSS.BucketName = c.getString("oss.bucketName", c.OSS.BucketName)
+	c.OSS.LimitSize = c.getInt("oss.limitSize", c.OSS.LimitSize)
 	// minio
 	c.Minio.URL = c.getString("minio.url", c.Minio.URL)
 	if c.FileService == FileServiceMinio {
@@ -1028,6 +1029,7 @@ type OSSConfig struct {
 	BucketURL       string // 文件下载地址域名 对应aliyun的Bucket域名
 	AccessKeyID     string
 	AccessKeySecret string
+	LimitSize       int
 }
 
 type MinioConfig struct {

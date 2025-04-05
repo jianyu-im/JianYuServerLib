@@ -2,7 +2,6 @@ package wkhttp
 
 import (
 	"errors"
-	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -273,34 +272,29 @@ func (l *WKHttp) AuthMiddleware(cache cache.Cache, tokenPrefix string) HandlerFu
 			})
 			return
 		}
-		uidAndNames := strings.Split(uidAndName, "@")
+		uidAndNames := strings.Split(uidAndName, "-|@Sass")
+		if len(uidAndNames) < 1 {
+			uidAndNames = strings.Split(uidAndName, "@")
+		}
 		if len(uidAndNames) < 2 {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
 				"msg": "token有误！",
 			})
 			return
 		}
-		for k, v := range uidAndNames {
-			fmt.Println("key", k, "value", v)
-		}
+
 		c.Set("uid", uidAndNames[0])
 		c.Set("name", uidAndNames[1])
 		if len(uidAndNames) == 3 {
-			fmt.Println("在这里")
 			c.Set("role", uidAndNames[2])
 		}
-		fmt.Println(len(uidAndNames))
-		fmt.Println(uidAndNames)
 		if len(uidAndNames) == 4 {
 			if c.GetHeader("companyCode") != uidAndNames[3] {
-				fmt.Println("cs1", c.GetHeader("companyCode"), "cs2", uidAndNames[3])
-				fmt.Println("header", c.GetHeader("companyCode"), "content", uidAndNames)
 				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
 					"msg": "企业编号不存在！",
 				})
 				return
 			}
-			fmt.Println("companyCode ok")
 			c.Set("companyCode", uidAndNames[3])
 		}
 		c.Next()
