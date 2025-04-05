@@ -289,11 +289,13 @@ func (l *WKHttp) AuthMiddleware(cache cache.Cache, tokenPrefix string) HandlerFu
 			c.Set("role", uidAndNames[2])
 		}
 		if len(uidAndNames) == 4 {
-			if c.GetHeader("companyCode") != uidAndNames[3] {
-				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
-					"msg": "企业编号不存在！",
-				})
-				return
+			if c.GetHeader("companyCode") == "" && uidAndNames[3] != "1001" {
+				if c.GetHeader("companyCode") != uidAndNames[3] {
+					c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+						"msg": "企业编号不存在！",
+					})
+					return
+				}
 			}
 			c.Set("companyCode", uidAndNames[3])
 		}
