@@ -280,11 +280,17 @@ func (l *WKHttp) AuthMiddleware(cache cache.Cache, tokenPrefix string) HandlerFu
 			})
 			return
 		}
+		for k, v := range uidAndNames {
+			fmt.Println("key", k, "value", v)
+		}
 		c.Set("uid", uidAndNames[0])
 		c.Set("name", uidAndNames[1])
 		if len(uidAndNames) == 3 {
+			fmt.Println("在这里")
 			c.Set("role", uidAndNames[2])
 		}
+		fmt.Println(len(uidAndNames))
+		fmt.Println(uidAndNames)
 		if len(uidAndNames) == 4 {
 			if c.GetHeader("companyCode") != uidAndNames[3] {
 				fmt.Println("cs1", c.GetHeader("companyCode"), "cs2", uidAndNames[3])
@@ -294,6 +300,7 @@ func (l *WKHttp) AuthMiddleware(cache cache.Cache, tokenPrefix string) HandlerFu
 				})
 				return
 			}
+			fmt.Println("companyCode ok")
 			c.Set("companyCode", uidAndNames[3])
 		}
 		c.Next()
