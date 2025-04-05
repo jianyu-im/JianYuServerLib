@@ -257,6 +257,7 @@ func (l *WKHttp) handlersToGinHandleFuncs(handlers []HandlerFunc) []gin.HandlerF
 
 // AuthMiddleware 认证中间件
 func (l *WKHttp) AuthMiddleware(cache cache.Cache, tokenPrefix string) HandlerFunc {
+
 	return func(c *Context) {
 		token := c.GetHeader("token")
 		if token == "" {
@@ -273,24 +274,27 @@ func (l *WKHttp) AuthMiddleware(cache cache.Cache, tokenPrefix string) HandlerFu
 			return
 		}
 		uidAndNames := strings.Split(uidAndName, "@")
-		if len(uidAndNames) < 3 {
+		if len(uidAndNames) < 2 {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
 				"msg": "token有误！",
 			})
 			return
 		}
-		if c.GetHeader("companyCode") != uidAndNames[2] {
-			fmt.Println(c.GetHeader("companyCode"), "参数", uidAndNames)
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
-				"msg": "Auth-企业编号不正确！",
-			})
-			return
-		}
 		c.Set("uid", uidAndNames[0])
 		c.Set("name", uidAndNames[1])
-		c.Set("companyCode", uidAndNames[2])
-		if len(uidAndNames) > 3 {
-			c.Set("role", uidAndNames[4])
+		if len(uidAndNames) == 3 {
+			c.Set("role", uidAndNames[2])
+		}
+		if len(uidAndNames) == 4 {
+			if c.GetHeader("companyCode") != uidAndNames[3] {
+				fmt.Println("cs1", c.GetHeader("companyCode"), "cs2", uidAndNames[3])
+				fmt.Println("header", c.GetHeader("companyCode"), "content", uidAndNames)
+				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+					"msg": "企业编号不存在！",
+				})
+				return
+			}
+			c.Set("companyCode", uidAndNames[3])
 		}
 		c.Next()
 	}
