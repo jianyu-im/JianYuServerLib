@@ -2,6 +2,7 @@ package wkhttp
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -282,10 +283,12 @@ func (l *WKHttp) AuthMiddleware(cache cache.Cache, tokenPrefix string) HandlerFu
 			})
 			return
 		}
-
+		for k, v := range uidAndNames {
+			fmt.Println("key", k, "value", v)
+		}
 		c.Set("uid", uidAndNames[0])
 		c.Set("name", uidAndNames[1])
-		if len(uidAndNames) == 3 {
+		if len(uidAndNames) > 2 {
 			c.Set("role", uidAndNames[2])
 		}
 		if len(uidAndNames) == 4 {
@@ -297,7 +300,6 @@ func (l *WKHttp) AuthMiddleware(cache cache.Cache, tokenPrefix string) HandlerFu
 					return
 				}
 			}
-			c.Set("role", uidAndNames[2])
 			c.Set("companyCode", uidAndNames[3])
 		}
 		c.Next()
