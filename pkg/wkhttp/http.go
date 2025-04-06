@@ -297,6 +297,7 @@ func (l *WKHttp) AuthMiddleware(cache cache.Cache, tokenPrefix string) HandlerFu
 					return
 				}
 			}
+			c.Set("role", uidAndNames[2])
 			c.Set("companyCode", uidAndNames[3])
 		}
 		c.Next()
