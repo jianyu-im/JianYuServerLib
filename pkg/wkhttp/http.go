@@ -2,7 +2,6 @@ package wkhttp
 
 import (
 	"errors"
-	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -282,9 +281,6 @@ func (l *WKHttp) AuthMiddleware(cache cache.Cache, tokenPrefix string) HandlerFu
 				"msg": "token有误！",
 			})
 			return
-		}
-		for k, v := range uidAndNames {
-			fmt.Println("key", k, "value", v)
 		}
 		c.Set("uid", uidAndNames[0])
 		c.Set("name", uidAndNames[1])

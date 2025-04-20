@@ -580,10 +580,11 @@ func (c *Context) SendCMD(req MsgCMDReq) error {
 	if req.Param != nil {
 		contentMap["param"] = req.Param
 	}
-	var noPersist = 0
-	if req.NoPersist {
-		noPersist = 1
-	}
+	//默认不存储
+	var noPersist = 1
+	//if req.NoPersist {
+	//	noPersist = 1
+	//}
 	setting := Setting{
 		NoUpdateConversation: true,
 	}
