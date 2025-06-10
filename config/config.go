@@ -53,7 +53,7 @@ type TablePartitionConfig struct {
 func newTablePartitionConfig() TablePartitionConfig {
 
 	return TablePartitionConfig{
-		MessageTableCount:         5,
+		MessageTableCount:         10,
 		MessageUserEditTableCount: 3,
 		ChannelOffsetTableCount:   3,
 	}
