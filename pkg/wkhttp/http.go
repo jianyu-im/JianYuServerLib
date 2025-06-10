@@ -273,31 +273,29 @@ func (l *WKHttp) AuthMiddleware(cache cache.Cache, tokenPrefix string) HandlerFu
 			return
 		}
 		uidAndNames := strings.Split(uidAndName, "-|@Sass")
-		if len(uidAndNames) < 1 {
-			uidAndNames = strings.Split(uidAndName, "@")
-		}
-		if len(uidAndNames) < 2 {
+
+		if len(uidAndNames) < 4 {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
 				"msg": "token有误！",
 			})
 			return
 		}
+		companyCode := c.GetHeader("companyCode")
+		if companyCode == "" {
+			companyCode = UidCompanyCode(uidAndNames[0])
+		}
+		if companyCode == "" {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+				"msg": "企业code有误！",
+			})
+			return
+		}
+
 		c.Set("uid", uidAndNames[0])
 		c.Set("name", uidAndNames[1])
-		if len(uidAndNames) > 2 {
-			c.Set("role", uidAndNames[2])
-		}
-		if len(uidAndNames) == 4 {
-			if c.GetHeader("companyCode") == "" && uidAndNames[3] != "1001" {
-				if c.GetHeader("companyCode") != uidAndNames[3] {
-					c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
-						"msg": "企业编号不存在！",
-					})
-					return
-				}
-			}
-			c.Set("companyCode", uidAndNames[3])
-		}
+		c.Set("role", uidAndNames[2])
+		c.Set("companyCode", companyCode)
+
 		c.Next()
 	}
 }
@@ -347,7 +345,7 @@ func CORSMiddleware() HandlerFunc {
 	return func(c *Context) {
 		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
 		c.Writer.Header().Set("Access-Control-Allow-Credentials", "true")
-		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, token, accept, origin, Cache-Control, X-Requested-With, appid, noncestr, sign, timestamp")
+		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, token,companyCode, accept, origin, Cache-Control, X-Requested-With, appid, noncestr, sign, timestamp")
 		c.Writer.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS, GET, PUT,DELETE,PATCH")
 
 		if c.Request.Method == "OPTIONS" {
@@ -357,4 +355,18 @@ func CORSMiddleware() HandlerFunc {
 
 		c.Next()
 	}
+}
+
+// UidCompanyCode 从 groupNo 中提取公司代码
+func UidCompanyCode(uid string) string {
+	// 使用 strings.Split 分割字符串，以 "code" 为分隔符
+	parts := strings.Split(uid, "code")
+
+	// 返回第一部分，即 "123456"
+	if len(parts) > 0 {
+		return parts[0]
+	}
+
+	// 如果没有找到有效的部分，则返回空字符串
+	return ""
 }
