@@ -46,6 +46,6 @@ type ChannelResp struct {
 	// RevokeRemind        int `json:"revoke_remind"`          // 是否开启撤回通知
 	// chatPwdOn           int `json:"chat_pwd_on"`            // 是否开启聊天密码
 	// AllowViewHistoryMsg int `json:"allow_view_history_msg"` // 是否允许新成员查看群历史记录
-
-	Extra map[string]interface{} `json:"extra"` // 扩展内容
+	DeptIds string                 `json:"dept_ids"` //部门ids
+	Extra   map[string]interface{} `json:"extra"`    // 扩展内容
 }
