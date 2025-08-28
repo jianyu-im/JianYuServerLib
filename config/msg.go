@@ -225,6 +225,28 @@ func (c *Context) IMCreateOrUpdateChannelInfo(req *ChannelInfoCreateReq) error {
 	return c.handlerIMError(resp)
 }
 
+// IMAddSystemUids 添加系统成员
+func (c *Context) IMAddSystemUids(uids []string) error {
+	resp, err := network.Post(c.cfg.WuKongIM.APIURL+"/user/systemuids_add", []byte(util.ToJson(map[string]interface{}{
+		"uids": uids,
+	})), nil)
+	if err != nil {
+		return err
+	}
+	return c.handlerIMError(resp)
+}
+
+// IMRemoveSystemUids 移除系统成员
+func (c *Context) IMRemoveSystemUids(uids []string) error {
+	resp, err := network.Post(c.cfg.WuKongIM.APIURL+"/user/systemuids_remove", []byte(util.ToJson(map[string]interface{}{
+		"uids": uids,
+	})), nil)
+	if err != nil {
+		return err
+	}
+	return c.handlerIMError(resp)
+}
+
 // IMCreateOrUpdateChannel 请求IM创建或更新频道
 func (c *Context) IMCreateOrUpdateChannel(req *ChannelCreateReq) error {
 	resp, err := network.Post(c.cfg.WuKongIM.APIURL+"/channel", []byte(util.ToJson(req)), nil)
