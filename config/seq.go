@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/gocraft/dbr/v2"
 )
@@ -20,6 +21,7 @@ type Seq struct {
 
 // GenSeq 生产序号
 func (c *Context) GenSeq(flag string) int64 {
+	return time.Now().UnixNano()
 	seqLock.RLock()
 	seq := seqMap[flag]
 	seqLock.RUnlock()
