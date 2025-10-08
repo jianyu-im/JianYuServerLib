@@ -9,11 +9,12 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"github.com/jianyu-im/JianYuServerLib/pkg/util/crypt"
 	"io/ioutil"
 	"log"
 	"os"
 	"strings"
+
+	"github.com/jianyu-im/JianYuServerLib/pkg/util/crypt"
 
 	"github.com/spf13/viper"
 )
@@ -199,4 +200,8 @@ func GetInt32(key string) int32 {
 
 func GetStringMap(key string) map[string]interface{} {
 	return conf.GetStringMap(key)
+}
+
+func GetBool(key string) bool {
+	return conf.GetBool(key)
 }
