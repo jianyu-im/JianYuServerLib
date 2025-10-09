@@ -173,6 +173,7 @@ const (
 
 // UserDeviceTokenPrefix 用户设备token缓存前缀
 const UserDeviceTokenPrefix = "userDeviceToken:"
+const UserVoipDeviceTokenPrefix = "userVoipDeviceToken:"
 
 // UserDeviceBadgePrefix 用户设备红点
 const UserDeviceBadgePrefix = "userDeviceBadge"
