@@ -24,6 +24,16 @@ const (
 	SuperAdmin UserRole = "superAdmin"
 )
 
+// 新角色代码常量
+const (
+	RoleSuperAdmin    = "super_admin"
+	RoleGAAdmin       = "ga_admin"
+	RoleGameAdmin     = "game_admin"
+	RoleCompanyAdmin  = "company_admin"
+	RoleNormalAdmin   = "normal_admin"
+	RoleReadonlyAdmin = "readonly_admin"
+)
+
 // WKHttp WKHttp
 type WKHttp struct {
 	r    *gin.Engine
@@ -150,7 +160,16 @@ func (c *Context) CheckLoginRole() error {
 	if role == "" {
 		return errors.New("登录用户角色错误")
 	}
-	if role != string(Admin) && role != string(SuperAdmin) {
+	// 只支持新角色系统
+	validRoles := map[string]bool{
+		RoleSuperAdmin:    true,
+		RoleGAAdmin:       true,
+		RoleGameAdmin:     true,
+		RoleCompanyAdmin:  true,
+		RoleNormalAdmin:   true,
+		RoleReadonlyAdmin: true,
+	}
+	if !validRoles[role] {
 		return errors.New("该用户无权执行此操作")
 	}
 	return nil
@@ -162,7 +181,7 @@ func (c *Context) CheckLoginRoleIsSuperAdmin() error {
 	if role == "" {
 		return errors.New("登录用户角色错误")
 	}
-	if role != string(SuperAdmin) {
+	if role != RoleSuperAdmin {
 		return errors.New("该用户无权执行此操作")
 	}
 	return nil
