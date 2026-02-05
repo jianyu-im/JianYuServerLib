@@ -26,6 +26,11 @@ type JyError struct {
 	EnMessage string
 }
 
+// Error 实现 error 接口，默认返回中文消息
+func (j *JyError) Error() string {
+	return j.CnMessage
+}
+
 func (j *JyError) ToError(ctx *wkhttp.Context) error {
 	lang := common.AppLanguage(ctx.GetHeader("language"))
 	switch lang {
