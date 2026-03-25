@@ -434,3 +434,13 @@ func (rc *Conn) UnLock(key string) error {
 	}
 	return nil
 }
+
+// Publish 向指定频道发布消息（用于跨节点通知）
+func (rc *Conn) Publish(channel string, message string) error {
+	return rc.client.Publish(channel, message).Err()
+}
+
+// Subscribe 订阅指定频道，返回 PubSub 对象
+func (rc *Conn) Subscribe(channels ...string) *rd.PubSub {
+	return rc.client.Subscribe(channels...)
+}
