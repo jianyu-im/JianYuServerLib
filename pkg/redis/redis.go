@@ -444,3 +444,21 @@ func (rc *Conn) Publish(channel string, message string) error {
 func (rc *Conn) Subscribe(channels ...string) *rd.PubSub {
 	return rc.client.Subscribe(channels...)
 }
+
+// SetNX 当键不存在时设置键值对（原子操作）
+// 返回 true 表示设置成功（键不存在），false 表示键已存在
+func (rc *Conn) SetNX(key string, value interface{}, expiration time.Duration) (bool, error) {
+	return rc.client.SetNX(key, value, expiration).Result()
+}
+
+// CompareAndDelete 原子性地比较并删除：仅当 key 的值等于 expectedValue 时才删除
+// 返回 true 表示删除成功，false 表示值不匹配（未删除）
+// 使用 Lua 脚本保证原子性，防止 TOCTOU 竞态
+func (rc *Conn) CompareAndDelete(key string, expectedValue string) (bool, error) {
+	script := `if redis.call("get", KEYS[1]) == ARGV[1] then return redis.call("del", KEYS[1]) else return 0 end`
+	result, err := rc.client.Eval(script, []string{key}, []string{expectedValue}).Int64()
+	if err != nil {
+		return false, err
+	}
+	return result == 1, nil
+}
