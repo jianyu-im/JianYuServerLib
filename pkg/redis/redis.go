@@ -22,6 +22,16 @@ func New(addr string, password string) *Conn {
 		Addr:       addr,
 		MaxRetries: 3, // 失败重试次数
 		Password:   password,
+		// go-redis 默认 PoolSize = runtime.NumCPU() * 10，小核心机器（2~4 核）只有 20~40
+		// 跨地域 Redis 单 RTT 约 30ms 时，高并发场景连接池会瞬间耗尽，goroutine
+		// 堆积在 pool.waitTurn 上，触发 gRPC/HTTP DeadlineExceeded。
+		// 这里显式调大，避免依赖宿主 CPU 核数。
+		PoolSize:     200,
+		MinIdleConns: 20,              // 预热空闲连接，避免冷启动抖动
+		DialTimeout:  5 * time.Second, // 建立连接超时
+		ReadTimeout:  3 * time.Second, // 单次读超时（避免慢查询长时间占用连接）
+		WriteTimeout: 3 * time.Second,
+		PoolTimeout:  4 * time.Second, // 从连接池等待空闲连接的超时
 	})
 	return c
 }
