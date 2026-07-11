@@ -158,6 +158,7 @@ type Config struct {
 	WuKongIM struct {
 		APIURL       string // im基地址
 		ManagerToken string // im的管理者token wukongim配置了就需要填写，没配置就不需要
+		Engine       string // IM引擎版本：v2=jianyuim fork（默认，行为不变）/ v3=上游 WuKongIM v3（部分接口走等价适配）
 	}
 	// ---------- 头像 ----------
 	Avatar struct {
@@ -389,8 +390,10 @@ func New() *Config {
 		WuKongIM: struct {
 			APIURL       string
 			ManagerToken string
+			Engine       string
 		}{
 			APIURL: "http://127.0.0.1:5001",
+			Engine: "v2", // 默认 v2，向后兼容既有产品
 		},
 
 		// ---------- avatar ----------
@@ -678,6 +681,7 @@ func (c *Config) ConfigureWithViper(vp *viper.Viper) {
 	//#################### 悟空IM ####################
 	c.WuKongIM.APIURL = c.getString("im.apiURL", c.WuKongIM.APIURL)
 	c.WuKongIM.ManagerToken = c.getString("im.token", c.WuKongIM.ManagerToken)
+	c.WuKongIM.Engine = c.getString("im.engine", c.WuKongIM.Engine)
 
 	//#################### 头像 ####################
 	c.Avatar.Default = c.getString("avatar.default", c.Avatar.Default)
