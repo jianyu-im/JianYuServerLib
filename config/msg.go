@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 
 	"github.com/jianyu-im/JianYuServerLib/common"
@@ -105,25 +106,30 @@ func (c *Context) QuitUserDevice(uid string, deviceFlag int) error {
 }
 
 // SendMessageBatch 给一批用户发送消息
+// WuKongIM v3 已无 /message/sendbatch；v3 的 subscribers 定向发送要求 sync_once=1（不落频道时间线），
+// 与 v2 sendbatch 落每人单聊频道的语义不同。为保持语义，改为逐人按单聊频道发送。
+// 调用方（管理后台群发）本身已做分片+worker池，逐条发送的吞吐可接受
 func (c *Context) SendMessageBatch(req *MsgSendBatch) error {
-	resp, err := network.Post(c.cfg.WuKongIM.APIURL+"/message/sendbatch", []byte(util.ToJson(req)), nil)
-	if err != nil {
-		return err
-	}
-	if resp.StatusCode != http.StatusOK {
-		if resp.StatusCode == http.StatusBadRequest {
-			resultMap, err := util.JsonToMap(resp.Body)
-			if err != nil {
-				return err
-			}
-			if resultMap != nil && resultMap["msg"] != nil {
-				return fmt.Errorf("IM服务[SendMessageBatch]失败！ -> %s", resultMap["msg"])
+	var firstErr error
+	for _, uid := range req.Subscribers {
+		if uid == "" || uid == req.FromUID {
+			continue
+		}
+		if err := c.SendMessage(&MsgSendReq{
+			Header:      req.Header,
+			FromUID:     req.FromUID,
+			ChannelID:   uid,
+			ChannelType: uint8(common.ChannelTypePerson),
+			Payload:     req.Payload,
+		}); err != nil {
+			// 单个接收者失败不中断整批，记录首个错误返回
+			c.Error("SendMessageBatch 单条发送失败", zap.String("to_uid", uid), zap.Error(err))
+			if firstErr == nil {
+				firstErr = err
 			}
 		}
-		return fmt.Errorf("IM服务[SendMessageBatch]返回状态[%d]失败！", resp.StatusCode)
 	}
-	return nil
-
+	return firstErr
 }
 
 // SendMessage 发送消息
@@ -150,8 +156,12 @@ func (c *Context) SendMessageWithResult(req *MsgSendReq) (*MsgSendResp, error) {
 		}
 		return nil, fmt.Errorf("IM服务[SendMessage]返回状态[%d]失败！", resp.StatusCode)
 	} else {
-		dataResult := gjson.Get(resp.Body, "data")
-
+		// WuKongIM v3 直接返回顶层 {message_id,message_seq,reason}；旧版包在 data 下，双格式兼容
+		root := gjson.Parse(resp.Body)
+		dataResult := root.Get("data")
+		if !dataResult.Exists() {
+			dataResult = root
+		}
 		messageID := dataResult.Get("message_id").Int()
 		messageSeq := dataResult.Get("message_seq").Int()
 		clientMsgNo := dataResult.Get("client_msg_no").String()
@@ -339,25 +349,85 @@ func (c *Context) IMRemoveSubscriber(req *SubscriberRemoveReq) error {
 	return c.handlerIMError(resp)
 }
 
-// IMGetConversations 获取用户最近会话列表
-func (c *Context) IMGetConversations(uid string) ([]*ConversationResp, error) {
+// conversationListCursor v3 /conversation/list 游标
+type conversationListCursor struct {
+	ActiveAt    int64  `json:"active_at"`
+	ChannelID   string `json:"channel_id"`
+	ChannelType int64  `json:"channel_type"`
+}
 
-	resp, err := network.Get(c.cfg.WuKongIM.APIURL+"/conversations", map[string]string{
-		"uid": uid,
-	}, nil)
-	if err != nil {
-		return nil, err
+// conversationListResp v3 /conversation/list 响应
+type conversationListResp struct {
+	Conversations []struct {
+		ChannelID   string `json:"channel_id"`
+		ChannelType int64  `json:"channel_type"`
+		ActiveAt    int64  `json:"active_at"` // 毫秒（实测 v3 返回 13 位时间戳）
+		Unread      uint64 `json:"unread"`
+		LastMessage *struct {
+			MessageID         uint64 `json:"message_id"`
+			MessageIDStr      string `json:"message_idstr"`
+			MessageSeq        uint64 `json:"message_seq"`
+			FromUID           string `json:"from_uid"`
+			ClientMsgNo       string `json:"client_msg_no"`
+			ServerTimestampMS int64  `json:"server_timestamp_ms"`
+			Payload           []byte `json:"payload"`
+		} `json:"last_message"`
+	} `json:"conversations"`
+	NextCursor *conversationListCursor `json:"next_cursor"`
+	More       int                     `json:"more"`
+}
+
+// IMGetConversations 获取用户最近会话列表
+// WuKongIM v3 已无 GET /conversations，改用 POST /conversation/list（游标分页）等价实现，
+// 输出结构保持 v2 的 ConversationResp 不变
+func (c *Context) IMGetConversations(uid string) ([]*ConversationResp, error) {
+	results := make([]*ConversationResp, 0)
+	var cursor *conversationListCursor
+	// 分页上限兜底，防异常游标死循环（100页×200条足够覆盖单用户会话数）
+	for page := 0; page < 100; page++ {
+		reqMap := map[string]interface{}{"uid": uid, "limit": 200}
+		if cursor != nil {
+			reqMap["cursor"] = cursor
+		}
+		resp, err := network.Post(c.cfg.WuKongIM.APIURL+"/conversation/list", []byte(util.ToJson(reqMap)), nil)
+		if err != nil {
+			return nil, err
+		}
+		if err := c.handlerIMError(resp); err != nil {
+			return nil, err
+		}
+		var listResp conversationListResp
+		if err := util.ReadJsonByByte([]byte(resp.Body), &listResp); err != nil {
+			return nil, err
+		}
+		for _, conv := range listResp.Conversations {
+			item := &ConversationResp{
+				ChannelID:   conv.ChannelID,
+				ChannelType: uint8(conv.ChannelType),
+				Unread:      int64(conv.Unread),
+				Timestamp:   conv.ActiveAt / 1000, // v3 active_at 为毫秒，v2 timestamp 为秒
+			}
+			if conv.LastMessage != nil {
+				item.LastMessage = &MessageResp{
+					MessageID:    int64(conv.LastMessage.MessageID),
+					MessageIDStr: conv.LastMessage.MessageIDStr,
+					MessageSeq:   uint32(conv.LastMessage.MessageSeq),
+					ClientMsgNo:  conv.LastMessage.ClientMsgNo,
+					FromUID:      conv.LastMessage.FromUID,
+					ChannelID:    conv.ChannelID,
+					ChannelType:  uint8(conv.ChannelType),
+					Timestamp:    int32(conv.LastMessage.ServerTimestampMS / 1000),
+					Payload:      conv.LastMessage.Payload,
+				}
+			}
+			results = append(results, item)
+		}
+		if listResp.More != 1 || listResp.NextCursor == nil {
+			break
+		}
+		cursor = listResp.NextCursor
 	}
-	err = c.handlerIMError(resp)
-	if err != nil {
-		return nil, err
-	}
-	var resps []*ConversationResp
-	err = util.ReadJsonByByte([]byte(resp.Body), &resps)
-	if err != nil {
-		return nil, err
-	}
-	return resps, nil
+	return results, nil
 }
 
 // IMClearConversationUnread 清除用户某个频道的未读数
@@ -419,49 +489,87 @@ func (c *Context) IMSyncUserConversation(uid string, version int64, msgCount int
 
 // }
 
-// IMGetChannelMaxSeq
-func (c *Context) IMGetChannelMaxSeq(channelID string, channelType uint8) (*ChannelMaxSeqResp, error) {
-	resp, err := network.Get(c.cfg.WuKongIM.APIURL+"/channel/max_message_seq", map[string]string{
-		"channel_id":   channelID,
-		"channel_type": fmt.Sprintf("%d", channelType),
-	}, nil)
+// IMGetChannelMaxSeq 获取频道最大消息序号
+// WuKongIM v3 已无 GET /channel/max_message_seq，用 messagesync 拉最新一条消息推导
+// （v3 中 start=0 且 end=0 表示从最新往回读）。
+// v3 的 messagesync 要求 login_uid 非空（个人频道用它做归一化），因此新增 loginUID 参数
+func (c *Context) IMGetChannelMaxSeq(channelID string, channelType uint8, loginUID string) (*ChannelMaxSeqResp, error) {
+	syncResp, err := c.IMSyncChannelMessage(SyncChannelMessageReq{
+		LoginUID:        loginUID,
+		ChannelID:       channelID,
+		ChannelType:     channelType,
+		StartMessageSeq: 0,
+		EndMessageSeq:   0,
+		Limit:           1,
+		PullMode:        PullModeDown,
+	})
 	if err != nil {
 		return nil, err
 	}
-	err = c.handlerIMError(resp)
-	if err != nil {
-		return nil, err
+	result := &ChannelMaxSeqResp{MessageSeq: 0}
+	if syncResp != nil {
+		for _, m := range syncResp.Messages {
+			if m != nil && m.MessageSeq > result.MessageSeq {
+				result.MessageSeq = m.MessageSeq
+			}
+		}
 	}
-	var ChannelMaxSeqResp *ChannelMaxSeqResp
-	err = util.ReadJsonByByte([]byte(resp.Body), &ChannelMaxSeqResp)
-	if err != nil {
-		return nil, err
-	}
-	return ChannelMaxSeqResp, nil
+	return result, nil
 }
 
-// IMGetWithChannelAndSeqs
+// IMGetWithChannelAndSeqs 按消息序号列表取消息
+// WuKongIM v3 已无 POST /messages（按 seq 列表查询），改用 messagesync 按连续段范围拉取后过滤。
+// 调用方（引用消息/置顶消息）的 seq 数量少，按连续段分组后请求次数 = 段数
 func (c *Context) IMGetWithChannelAndSeqs(channelID string, channelType uint8, loginUID string, seqs []uint32) (*SyncChannelMessageResp, error) {
-	var req = map[string]interface{}{
-		"channel_id":   channelID,
-		"channel_type": channelType,
-		"message_seqs": seqs,
-		"login_uid":    loginUID,
+	result := &SyncChannelMessageResp{Messages: make([]*MessageResp, 0, len(seqs))}
+	if len(seqs) == 0 {
+		return result, nil
 	}
-	resp, err := network.Post(c.cfg.WuKongIM.APIURL+"/messages", []byte(util.ToJson(req)), nil)
-	if err != nil {
-		return nil, err
+	// 去重升序
+	sorted := make([]uint32, 0, len(seqs))
+	seen := make(map[uint32]struct{}, len(seqs))
+	for _, seq := range seqs {
+		if seq == 0 {
+			continue
+		}
+		if _, ok := seen[seq]; !ok {
+			seen[seq] = struct{}{}
+			sorted = append(sorted, seq)
+		}
 	}
-	err = c.handlerIMError(resp)
-	if err != nil {
-		return nil, err
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+	// 连续段分组，逐段 messagesync（start 含界，end 排他）
+	for i := 0; i < len(sorted); {
+		j := i
+		for j+1 < len(sorted) && sorted[j+1] == sorted[j]+1 {
+			j++
+		}
+		startSeq, endSeq := sorted[i], sorted[j]
+		syncResp, err := c.IMSyncChannelMessage(SyncChannelMessageReq{
+			LoginUID:        loginUID,
+			ChannelID:       channelID,
+			ChannelType:     channelType,
+			StartMessageSeq: startSeq,
+			EndMessageSeq:   endSeq + 1,
+			Limit:           int(endSeq - startSeq + 1),
+			PullMode:        PullModeUp,
+		})
+		if err != nil {
+			return nil, err
+		}
+		if syncResp != nil {
+			for _, m := range syncResp.Messages {
+				if m == nil {
+					continue
+				}
+				if _, ok := seen[m.MessageSeq]; ok {
+					result.Messages = append(result.Messages, m)
+				}
+			}
+		}
+		i = j + 1
 	}
-	var syncChannelMessageResp *SyncChannelMessageResp
-	err = util.ReadJsonByByte([]byte(resp.Body), &syncChannelMessageResp)
-	if err != nil {
-		return nil, err
-	}
-	return syncChannelMessageResp, nil
+	return result, nil
 }
 
 // IMSyncChannelMessage 同步频道消息
@@ -543,21 +651,14 @@ func (c *Context) IMDelChannel(req *ChannelDeleteReq) error {
 
 // IMSearchUserMessages 搜索用户消息
 func (c *Context) IMSearchUserMessages(req *SearchUserMessageReq) (*SearchUserMessageResp, error) {
-	resp, err := network.Post(c.cfg.WuKongIM.APIURL+"/plugins/wk.plugin.search/usersearch", []byte(util.ToJson(req)), nil)
-	if err != nil {
-		return nil, err
-	}
-	err = c.handlerIMError(resp)
-	if err != nil {
-		return nil, err
-	}
-	println(resp.Body)
-	var messageResp *SearchUserMessageResp
-	err = util.ReadJsonByByte([]byte(resp.Body), &messageResp)
-	if err != nil {
-		return nil, err
-	}
-	return messageResp, nil
+	// WuKongIM v3 暂无 wk.plugin.search 搜索插件，降级返回空结果（全文搜索走服务端自建索引）
+	c.Warn("IMSearchUserMessages：WuKongIM v3 暂无搜索插件，返回空结果")
+	return &SearchUserMessageResp{
+		Total:    0,
+		Limit:    req.Limit,
+		Page:     req.Page,
+		Messages: make([]*MessageResp, 0),
+	}, nil
 }
 
 // IMGetWithMessageID 根据消息ID获取消息详情
