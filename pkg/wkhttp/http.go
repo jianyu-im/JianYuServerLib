@@ -284,7 +284,17 @@ func (l *WKHttp) AuthMiddleware(cache cache.Cache, tokenPrefix string) HandlerFu
 			})
 			return
 		}
-		uidAndName := GetLoginUID(token, tokenPrefix, cache)
+		uidAndName, err := GetLoginUIDWithErr(token, tokenPrefix, cache)
+		if err != nil {
+			// Redis 故障绝不能回 401。客户端（尤其安卓）拿到 401 会清账号退回登录页，
+			// 于是一次几秒的 Redis 抖动就把全量在线用户登出，还会引发每秒一次的无限重登把服务打得更惨。
+			// 503 的语义是"服务暂时不可用"，客户端保留 token 原样重试即可。
+			// 2026-08-20 事故：watcher 打空连接池 → token 校验 dial timeout → 全站"登录后立刻被登出"。
+			c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{
+				"msg": "服务繁忙，请稍后重试",
+			})
+			return
+		}
 		if strings.TrimSpace(uidAndName) == "" {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
 				"msg": "请先登录！",
@@ -319,13 +329,24 @@ func (l *WKHttp) AuthMiddleware(cache cache.Cache, tokenPrefix string) HandlerFu
 	}
 }
 
-// GetLoginUID GetLoginUID
+// GetLoginUID 兼容旧签名：取不到就返回空串，调用方无法区分"Redis 挂了"和"token 不存在"。
+// 鉴权路径请一律改用 GetLoginUIDWithErr——把这两种情况混为一谈会在 Redis 抖动时把在线用户整批登出。
 func GetLoginUID(token string, tokenPrefix string, cache cache.Cache) string {
+	uid, _ := GetLoginUIDWithErr(token, tokenPrefix, cache)
+	return uid
+}
+
+// GetLoginUIDWithErr 返回 (uid, err)。
+//
+// err != nil 表示 Redis 本身出了问题（连接超时、网络故障等），此时的空 uid
+// 不能被解读成"token 无效"——底层 cache.Get 对"key 不存在"返回的是 ("", nil)，
+// 只有真故障才带 err，所以两者在这里是可以严格区分的。
+func GetLoginUIDWithErr(token string, tokenPrefix string, cache cache.Cache) (string, error) {
 	uid, err := cache.Get(tokenPrefix + token)
 	if err != nil {
-		return ""
+		return "", err
 	}
-	return uid
+	return uid, nil
 }
 
 // RouterGroup RouterGroup
