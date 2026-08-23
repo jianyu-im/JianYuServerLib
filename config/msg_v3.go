@@ -228,3 +228,69 @@ func (c *Context) imSearchUserMessagesV3(req *SearchUserMessageReq) (*SearchUser
 		Messages: make([]*MessageResp, 0),
 	}, nil
 }
+
+// imSyncUserConversationV3 v3 无 POST /conversation/sync（上游 main 在 2026-07 之后移除，实测返回 404），
+// 改用 POST /conversation/list 游标分页全量聚合。
+//
+// 与 v2 的语义差异（调用方已能容忍，见 modules/message/api_conversation.go 对空 Recents 的处理）：
+//   - version 增量：v3 没有会话版本号，参数被忽略，每次返回全量会话；返回的 Version 恒为 0，
+//     客户端拿不到可回传的增量水位，等价于每次全量刷新会话列表。
+//   - Recents：v2 会带回每个会话最近 msgCount 条消息；v3 的 list 每个会话只给 last_message，
+//     这里只填 1 条。逐会话再调 messagesync 补齐会把一次同步放大成 N 次 HTTP，得不偿失；
+//     客户端进入会话后本来就会走 /message/channel/sync 拉历史。
+//   - lastMsgSeqs / larges：v3 无对应入参（超大群不再需要调用方声明），忽略。
+func (c *Context) imSyncUserConversationV3(uid string, msgCount int64) ([]*SyncUserConversationResp, error) {
+	results := make([]*SyncUserConversationResp, 0)
+	var cursor *conversationListCursor
+	// 分页上限兜底，防异常游标死循环（100页×200条足够覆盖单用户会话数）
+	for page := 0; page < 100; page++ {
+		reqMap := map[string]interface{}{"uid": uid, "limit": 200}
+		if cursor != nil {
+			reqMap["cursor"] = cursor
+		}
+		resp, err := network.Post(c.cfg.WuKongIM.APIURL+"/conversation/list", []byte(util.ToJson(reqMap)), nil)
+		if err != nil {
+			return nil, err
+		}
+		if err := c.handlerIMError(resp); err != nil {
+			return nil, err
+		}
+		var listResp conversationListResp
+		if err := util.ReadJsonByByte([]byte(resp.Body), &listResp); err != nil {
+			return nil, err
+		}
+		for _, conv := range listResp.Conversations {
+			item := &SyncUserConversationResp{
+				ChannelID:   conv.ChannelID,
+				ChannelType: uint8(conv.ChannelType),
+				Unread:      int(conv.Unread),
+				Timestamp:   conv.ActiveAt / 1000, // v3 active_at 为毫秒，v2 timestamp 为秒
+				Version:     0,                    // v3 无会话版本号
+				Recents:     make([]*MessageResp, 0, 1),
+			}
+			if conv.LastMessage != nil {
+				item.LastMsgSeq = int64(conv.LastMessage.MessageSeq)
+				item.LastClientMsgNo = conv.LastMessage.ClientMsgNo
+				if msgCount != 0 {
+					item.Recents = append(item.Recents, &MessageResp{
+						MessageID:    int64(conv.LastMessage.MessageID),
+						MessageIDStr: conv.LastMessage.MessageIDStr,
+						MessageSeq:   uint32(conv.LastMessage.MessageSeq),
+						ClientMsgNo:  conv.LastMessage.ClientMsgNo,
+						FromUID:      conv.LastMessage.FromUID,
+						ChannelID:    conv.ChannelID,
+						ChannelType:  uint8(conv.ChannelType),
+						Timestamp:    int32(conv.LastMessage.ServerTimestampMS / 1000),
+						Payload:      conv.LastMessage.Payload,
+					})
+				}
+			}
+			results = append(results, item)
+		}
+		if listResp.More != 1 || listResp.NextCursor == nil {
+			break
+		}
+		cursor = listResp.NextCursor
+	}
+	return results, nil
+}

@@ -392,6 +392,10 @@ func (c *Context) IMDeleteConversation(req DeleteConversationReq) error {
 // IMSyncUserConversation 同步用户会话数据
 func (c *Context) IMSyncUserConversation(uid string, version int64, msgCount int64, lastMsgSeqs string, larges []*Channel) ([]*SyncUserConversationResp, error) {
 
+	if c.imEngineV3() {
+		return c.imSyncUserConversationV3(uid, msgCount)
+	}
+
 	resp, err := network.Post(c.cfg.WuKongIM.APIURL+"/conversation/sync", []byte(util.ToJson(map[string]interface{}{
 		"uid":           uid,
 		"version":       version,
