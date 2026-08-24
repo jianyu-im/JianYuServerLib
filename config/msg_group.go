@@ -156,6 +156,15 @@ func (c *Context) SendGroupMemberAdd(req *MsgGroupMemberAddReq) error {
 	if members == nil {
 		members = make([]*UserBaseVo, 0)
 	}
+	// WuKongIM v3 的会话目录是显式的 UID-owned membership。只添加群订阅者并不会
+	// 保证新成员立即拥有会话；过去完全依赖下面这条 tip 消息顺带创建会话，一旦消息
+	// 因 from_uid/白名单/短时不可用发送失败，业务库虽已有成员，客户端却永远看不到群。
+	// 先幂等激活每个新成员的群会话，再发送可见提示。
+	if c.IMV3Enabled() {
+		if err := c.activateGroupMemberConversationsV3(req.GroupNo, members); err != nil {
+			return fmt.Errorf("激活新成员群会话失败: %w", err)
+		}
+	}
 
 	params := make([]string, 0, len(members))
 	for index := range members {

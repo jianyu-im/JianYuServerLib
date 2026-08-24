@@ -158,6 +158,10 @@ type Config struct {
 	WuKongIM struct {
 		APIURL       string // im基地址
 		ManagerToken string // im的管理者token wukongim配置了就需要填写，没配置就不需要
+		// APIVersion 指定对接的 WuKongIM 引擎大版本："v2"(默认) 或 "v3"。
+		// v3 移除了 /conversation/sync、/conversations、/messages、/message/sendbatch、
+		// /channel/max_message_seq 等接口，需要走适配层(msg_v3.go)翻译。
+		APIVersion string
 	}
 	// ---------- 头像 ----------
 	Avatar struct {
@@ -389,8 +393,10 @@ func New() *Config {
 		WuKongIM: struct {
 			APIURL       string
 			ManagerToken string
+			APIVersion   string
 		}{
-			APIURL: "http://127.0.0.1:5001",
+			APIURL:     "http://127.0.0.1:5001",
+			APIVersion: "v2",
 		},
 
 		// ---------- avatar ----------
@@ -677,6 +683,8 @@ func (c *Config) ConfigureWithViper(vp *viper.Viper) {
 
 	//#################### 悟空IM ####################
 	c.WuKongIM.APIURL = c.getString("im.apiURL", c.WuKongIM.APIURL)
+	// im.apiVersion: "v2"(默认) 或 "v3"，v3 会启用 msg_v3.go 的接口适配层
+	c.WuKongIM.APIVersion = c.getString("im.apiVersion", c.WuKongIM.APIVersion)
 	c.WuKongIM.ManagerToken = c.getString("im.token", c.WuKongIM.ManagerToken)
 
 	//#################### 头像 ####################

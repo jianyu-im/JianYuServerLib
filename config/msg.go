@@ -38,8 +38,9 @@ const (
 )
 
 type Channel struct {
-	ChannelID   string `json:"channel_id"`   // 频道ID
-	ChannelType uint8  `json:"channel_type"` // 频道类型
+	ChannelID      string `json:"channel_id"`                // 频道ID
+	ChannelType    uint8  `json:"channel_type"`              // 频道类型
+	HistoryVisible int    `json:"history_visible,omitempty"` // 缺失成员索引重建时是否从频道起点同步（对应群「允许新成员查看历史消息」）
 }
 
 func (d DeviceFlag) Uint8() uint8 {
@@ -106,6 +107,10 @@ func (c *Context) QuitUserDevice(uid string, deviceFlag int) error {
 
 // SendMessageBatch 给一批用户发送消息
 func (c *Context) SendMessageBatch(req *MsgSendBatch) error {
+	if c.IMV3Enabled() {
+		return c.sendMessageBatchV3(req)
+	}
+
 	resp, err := network.Post(c.cfg.WuKongIM.APIURL+"/message/sendbatch", []byte(util.ToJson(req)), nil)
 	if err != nil {
 		return err
@@ -134,6 +139,9 @@ func (c *Context) SendMessage(req *MsgSendReq) error {
 
 // SendMessage 发送消息
 func (c *Context) SendMessageWithResult(req *MsgSendReq) (*MsgSendResp, error) {
+	if c.IMV3Enabled() {
+		req = adaptSendReqV3(req, c.cfg.Account.SystemUID)
+	}
 	resp, err := network.Post(c.cfg.WuKongIM.APIURL+"/message/send", []byte(util.ToJson(req)), nil)
 	if err != nil {
 		return nil, err
@@ -148,13 +156,30 @@ func (c *Context) SendMessageWithResult(req *MsgSendReq) (*MsgSendResp, error) {
 				return nil, fmt.Errorf("IM服务[SendMessage]失败！ -> %s", resultMap["msg"])
 			}
 		}
-		return nil, fmt.Errorf("IM服务[SendMessage]返回状态[%d]失败！", resp.StatusCode)
+		// v3 的错误体是 {"error":"invalid request"}，没有 msg 字段，
+		// 只打状态码等于没有任何线索（线上四万多条 400 全是一句"返回状态[400]失败"），把响应体带上
+		return nil, fmt.Errorf("IM服务[SendMessage]返回状态[%d]失败！ -> %s", resp.StatusCode, strings.TrimSpace(resp.Body))
 	} else {
 		dataResult := gjson.Get(resp.Body, "data")
+		if !dataResult.Exists() {
+			// v3 把结果直接放在顶层（{"message_id":..,"message_seq":..,"reason":1}），没有 data 包裹。
+			// 按 data 取会全拿到零值：机器人接口返回给第三方的 message_id 恒为 0。
+			dataResult = gjson.Parse(resp.Body)
+		}
 
 		messageID := dataResult.Get("message_id").Int()
 		messageSeq := dataResult.Get("message_seq").Int()
 		clientMsgNo := dataResult.Get("client_msg_no").String()
+		// v3 拒收消息时返回的仍是 200，只在 body 里给一个 reason（1=成功）。
+		// 只看 HTTP 状态码会把「被拒收」当成功，消息静默消失、日志里没有任何痕迹——
+		// 典型场景：禁言群的白名单不含系统号，入群提示被拒（reason=13），
+		// 新成员在群里没有任何可见消息，客户端整个群都不出现。
+		if c.IMV3Enabled() {
+			if reason := dataResult.Get("reason"); reason.Exists() && reason.Int() != int64(msgReasonSuccessV3) {
+				return nil, fmt.Errorf("IM服务[SendMessage]拒收消息！reason=%d(%s) channel=%s type=%d from=%s",
+					reason.Int(), msgReasonTextV3(reason.Int()), req.ChannelID, req.ChannelType, req.FromUID)
+			}
+		}
 		return &MsgSendResp{
 			MessageID:   messageID,
 			MessageSeq:  uint32(messageSeq),
@@ -298,12 +323,34 @@ func (c *Context) IMWhitelistAdd(req ChannelWhitelistReq) error {
 
 // IMWhitelistSet 白名单设置（覆盖旧的数据）
 func (c *Context) IMWhitelistSet(req ChannelWhitelistReq) error {
+	req.UIDs = withSystemUIDInWhitelist(req.UIDs, c.cfg.Account.SystemUID)
 
 	resp, err := network.Post(c.cfg.WuKongIM.APIURL+"/channel/whitelist_set", []byte(util.ToJson(req)), nil)
 	if err != nil {
 		return err
 	}
 	return c.handlerIMError(resp)
+}
+
+// withSystemUIDInWhitelist 白名单非空时兜底把系统号补进去。
+//
+// IM 侧的判定是「频道白名单非空 → 只有白名单里的人能发消息」，与是否全员禁言无关。
+// 群禁言把白名单设成「群主+管理员」，系统号不在其中，于是入群提示、被移出群聊等系统消息
+// 一律被 IM 拒收（v2 是 hasPermissionForSender 的 ReasonNotInWhitelist，v3 返回 200+reason=13），
+// 新成员在群里没有任何可见消息，会话列表里就不会出现这个群。
+//
+// 空白名单表示「不启用白名单」（取消禁言就是把它清空），这种情况必须保持为空，
+// 否则只剩系统号能发言，全群都被禁言了。
+func withSystemUIDInWhitelist(uids []string, systemUID string) []string {
+	if len(uids) == 0 || strings.TrimSpace(systemUID) == "" {
+		return uids
+	}
+	for _, uid := range uids {
+		if uid == systemUID {
+			return uids
+		}
+	}
+	return append(append(make([]string, 0, len(uids)+1), uids...), systemUID)
 }
 
 // IMWhitelistRemove 移除白名单
@@ -341,6 +388,9 @@ func (c *Context) IMRemoveSubscriber(req *SubscriberRemoveReq) error {
 
 // IMGetConversations 获取用户最近会话列表
 func (c *Context) IMGetConversations(uid string) ([]*ConversationResp, error) {
+	if c.IMV3Enabled() {
+		return c.imGetConversationsV3(uid)
+	}
 
 	resp, err := network.Get(c.cfg.WuKongIM.APIURL+"/conversations", map[string]string{
 		"uid": uid,
@@ -382,6 +432,12 @@ func (c *Context) IMDeleteConversation(req DeleteConversationReq) error {
 
 // IMSyncUserConversation 同步用户会话数据
 func (c *Context) IMSyncUserConversation(uid string, version int64, msgCount int64, lastMsgSeqs string, larges []*Channel) ([]*SyncUserConversationResp, error) {
+	if c.IMV3Enabled() {
+		// v3 的会话列表按游标翻页，不吃 lastMsgSeqs；larges 在 v3 由 server 传入业务库中的
+		// 全部有效群，作为目录校准集合（业务库已在群、IM 目录缺行时幂等补建），
+		// 不再是 v2 的超大群语义。
+		return c.imSyncUserConversationV3(uid, version, msgCount, larges)
+	}
 
 	resp, err := network.Post(c.cfg.WuKongIM.APIURL+"/conversation/sync", []byte(util.ToJson(map[string]interface{}{
 		"uid":           uid,
@@ -421,6 +477,10 @@ func (c *Context) IMSyncUserConversation(uid string, version int64, msgCount int
 
 // IMGetChannelMaxSeq
 func (c *Context) IMGetChannelMaxSeq(channelID string, channelType uint8) (*ChannelMaxSeqResp, error) {
+	if c.IMV3Enabled() {
+		return c.imGetChannelMaxSeqV3(channelID, channelType)
+	}
+
 	resp, err := network.Get(c.cfg.WuKongIM.APIURL+"/channel/max_message_seq", map[string]string{
 		"channel_id":   channelID,
 		"channel_type": fmt.Sprintf("%d", channelType),
@@ -440,8 +500,55 @@ func (c *Context) IMGetChannelMaxSeq(channelID string, channelType uint8) (*Chan
 	return ChannelMaxSeqResp, nil
 }
 
+// IMGetChannelMaxSeqWithLoginUID 以指定用户身份查询频道最大 seq。
+//
+// v3 的 messagesync 带成员校验（个人频道还要用 loginUID 做归一化），
+// 用真实成员身份查询才能拿到真值；v2 引擎下与 IMGetChannelMaxSeq 等价。
+//
+// 注意这里刻意不走 imV3SyncChannelMessages：那条路径会把「membership required」
+// 伪装成空时间线，而本函数的调用方（入群隐藏历史的 channel_offset）拿到 0 会把
+// 偏移写成 0=全量放开历史。成员校验失败必须原样抛错，让调用方换成员重试或回落。
+func (c *Context) IMGetChannelMaxSeqWithLoginUID(channelID string, channelType uint8, loginUID string) (*ChannelMaxSeqResp, error) {
+	if !c.IMV3Enabled() {
+		return c.IMGetChannelMaxSeq(channelID, channelType)
+	}
+	resp, err := network.Post(c.cfg.WuKongIM.APIURL+"/channel/messagesync", []byte(util.ToJson(map[string]interface{}{
+		"login_uid":         loginUID,
+		"channel_id":        channelID,
+		"channel_type":      channelType,
+		"start_message_seq": 0,
+		"end_message_seq":   0,
+		"limit":             1,
+		"pull_mode":         PullModeDown,
+	})), nil)
+	if err != nil {
+		return nil, err
+	}
+	if err = c.handlerIMError(resp); err != nil {
+		return nil, err
+	}
+	var out SyncChannelMessageResp
+	if err = util.ReadJsonByByte([]byte(resp.Body), &out); err != nil {
+		return nil, err
+	}
+	var maxSeq uint32
+	for _, msg := range out.Messages {
+		if msg != nil && msg.MessageSeq > maxSeq {
+			maxSeq = msg.MessageSeq
+		}
+	}
+	if maxSeq == 0 && out.EndMessageSeq > maxSeq {
+		maxSeq = out.EndMessageSeq
+	}
+	return &ChannelMaxSeqResp{MessageSeq: maxSeq}, nil
+}
+
 // IMGetWithChannelAndSeqs
 func (c *Context) IMGetWithChannelAndSeqs(channelID string, channelType uint8, loginUID string, seqs []uint32) (*SyncChannelMessageResp, error) {
+	if c.IMV3Enabled() {
+		return c.imGetMessagesBySeqsV3(channelID, channelType, loginUID, seqs)
+	}
+
 	var req = map[string]interface{}{
 		"channel_id":   channelID,
 		"channel_type": channelType,
@@ -473,12 +580,22 @@ func (c *Context) IMSyncChannelMessage(req SyncChannelMessageReq) (*SyncChannelM
 	}
 	err = c.handlerIMError(resp)
 	if err != nil {
+		// v3 里「频道不存在」是以成员校验失败的形式返回的，降级成空时间线，
+		// 否则客户端打开系统号单聊或废弃群时会直接报错打不开
+		if c.IMV3Enabled() && isChannelAbsentErrV3(err) {
+			c.Warn("v3频道无时间线，按空结果返回", zap.String("channel_id", req.ChannelID), zap.Uint8("channel_type", req.ChannelType), zap.Error(err))
+			return emptySyncChannelMessageRespV3(req.StartMessageSeq, req.EndMessageSeq, req.PullMode), nil
+		}
 		return nil, err
 	}
 	var syncChannelMessageResp *SyncChannelMessageResp
 	err = util.ReadJsonByByte([]byte(resp.Body), &syncChannelMessageResp)
 	if err != nil {
 		return nil, err
+	}
+	if c.IMV3Enabled() && syncChannelMessageResp != nil {
+		// v3 的响应体不带 pull_mode，反序列化后恒为 0（PullModeDown），按请求回填保持 v2 契约
+		syncChannelMessageResp.PullMode = req.PullMode
 	}
 	return syncChannelMessageResp, nil
 }
@@ -524,7 +641,10 @@ func (c *Context) IMSyncMessageAck(req *SyncackReq) error {
 
 // IMRevokeMessage 撤回IM消息
 func (c *Context) IMRevokeMessage(req *MessageRevokeReq) error {
-
+	if c.IMV3Enabled() {
+		// v3 没有 /message/revoke 路由，打过去必然 404。撤回请走 SendRevoke 的 messageRevoke CMD 路径。
+		return errors.New("v3引擎不支持/message/revoke，撤回请使用SendRevoke")
+	}
 	resp, err := network.Post(c.cfg.WuKongIM.APIURL+"/message/revoke", []byte(util.ToJson(req)), nil)
 	if err != nil {
 		return err
@@ -562,6 +682,10 @@ func (c *Context) IMSearchUserMessages(req *SearchUserMessageReq) (*SearchUserMe
 
 // IMGetWithMessageID 根据消息ID获取消息详情
 func (c *Context) IMSearchMessages(req *MsgSearchReq) (*SyncChannelMessageResp, error) {
+	if c.IMV3Enabled() {
+		return c.imSearchMessagesV3(req)
+	}
+
 	resp, err := network.Post(c.cfg.WuKongIM.APIURL+"/messages", []byte(util.ToJson(req)), nil)
 	if err != nil {
 		return nil, err
@@ -602,6 +726,15 @@ func (c *Context) SendCMD(req MsgCMDReq) error {
 	if req.Param != nil {
 		contentMap["param"] = req.Param
 	}
+	// v3 的群 CMD 会被改写成定向投递（见 sendGroupCMDV3），到客户端的帧上带的是
+	// 按订阅者算出来的合成频道 id，不再是群号。安卓 SDK 在 param 没带频道时是拿帧上的
+	// channel_id 兜底的（CMDManager.handleCMD），拿到合成 id 就会作用到一个不存在的会话上。
+	// 这里把真实群号写进 CMD 顶层——安卓的兜底顺序是 param > CMD 顶层 > 帧，正好覆盖。
+	// 只对群频道这么做：单聊的频道 id 是「对端视角」的，服务端这边的值填过去反而是错的。
+	if c.IMV3Enabled() && req.ChannelType == common.ChannelTypeGroup.Uint8() && strings.TrimSpace(req.ChannelID) != "" {
+		contentMap["channel_id"] = req.ChannelID
+		contentMap["channel_type"] = req.ChannelType
+	}
 	//默认不存储
 	var noPersist = 1
 	//if req.NoPersist {
@@ -613,7 +746,7 @@ func (c *Context) SendCMD(req MsgCMDReq) error {
 
 	contentBytes := []byte(util.ToJson(contentMap))
 
-	return c.SendMessage(&MsgSendReq{
+	sendReq := &MsgSendReq{
 		Header: MsgHeader{
 			NoPersist: noPersist,
 			RedDot:    0,
@@ -625,7 +758,14 @@ func (c *Context) SendCMD(req MsgCMDReq) error {
 		ChannelType: req.ChannelType,
 		Subscribers: req.Subscribers,
 		Payload:     contentBytes,
-	})
+	}
+	if c.IMV3Enabled() {
+		// v3 的群 CMD 走频道投递查不到订阅者，改成按成员定向投递，详见 sendGroupCMDV3
+		if handled, err := c.sendGroupCMDV3(sendReq); handled {
+			return err
+		}
+	}
+	return c.SendMessage(sendReq)
 }
 
 func (c *Context) SendTyping(channelID string, channelType uint8, fromUID string) error {
@@ -731,6 +871,10 @@ func (c *Context) IMSOnlineStatus(uids []string) ([]*OnlinestatusResp, error) {
 	if c.cfg.Test {
 		c.Info("获取指定用户的在线状态", zap.String("req", util.ToJson(uids)))
 		return nil, nil
+	}
+	if len(uids) == 0 {
+		// v3 对空 uids 返回对象 {"status":200} 而不是数组，反序列化必炸；空入参没有查询意义，直接短路
+		return make([]*OnlinestatusResp, 0), nil
 	}
 	resp, err := network.Post(c.cfg.WuKongIM.APIURL+"/user/onlinestatus", []byte(util.ToJson(uids)), nil)
 	if err != nil {
@@ -1092,6 +1236,9 @@ type SubscriberAddReq struct {
 	ChannelType uint8    `json:"channel_type"`
 	Reset       int      `json:"reset"` // 是否重置订阅者 （0.不重置 1.重置），选择重置，将删除原来的所有成员
 	Subscribers []string `json:"subscribers"`
+	// HistoryVisible 新成员是否可见入群前的历史消息（对应群设置「允许新成员查看历史消息」）。
+	// v3 的 messagesync 在服务端按成员 JoinSeq 过滤历史，不传则新成员永远拉不到入群前的消息。
+	HistoryVisible int `json:"history_visible,omitempty"`
 }
 
 // SubscriberRemoveReq 移除订阅请求
