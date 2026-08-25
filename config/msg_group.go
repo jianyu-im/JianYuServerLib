@@ -14,6 +14,16 @@ func (c *Context) SendGroupCreate(req *MsgGroupCreateReq) error {
 	if members == nil {
 		members = make([]*UserBaseVo, 0)
 	}
+	// v3 的会话目录是显式的 UID-owned membership，建群后成员能否立刻看到群
+	// 不能依赖下面这条「创建群聊」提示消息（一旦被 v3 按策略拒收，例如系统号
+	// 不受信 reason=3，全体成员直到有人发言前都看不到新群——2026-08-24 现场：
+	// 6 小时内 group.create 事件 10 失败 1 成功）。与 SendGroupMemberAdd 对齐：
+	// 先幂等激活全体成员（含群主）的群会话，再发可见提示，失败交给事件 outbox 重试。
+	if c.imEngineV3() {
+		if err := c.activateGroupMemberConversationsV3(req.GroupNo, members); err != nil {
+			return fmt.Errorf("激活建群成员会话失败: %w", err)
+		}
+	}
 
 	params := make([]string, 0, len(members))
 	newMembers := make([]*UserBaseVo, 0, len(members))
@@ -155,6 +165,15 @@ func (c *Context) SendGroupMemberAdd(req *MsgGroupMemberAddReq) error {
 	members := req.Members
 	if members == nil {
 		members = make([]*UserBaseVo, 0)
+	}
+	// WuKongIM v3 的会话目录是显式的 UID-owned membership。只添加群订阅者并不会
+	// 保证新成员立即拥有会话；过去完全依赖下面这条 tip 消息顺带创建会话，一旦消息
+	// 因 from_uid/白名单/短时不可用发送失败，业务库虽已有成员，客户端却永远看不到群。
+	// 先幂等激活每个新成员的群会话，再发送可见提示，二者任一步失败都交给事件 outbox 重试。
+	if c.imEngineV3() {
+		if err := c.activateGroupMemberConversationsV3(req.GroupNo, members); err != nil {
+			return fmt.Errorf("激活新成员群会话失败: %w", err)
+		}
 	}
 
 	params := make([]string, 0, len(members))

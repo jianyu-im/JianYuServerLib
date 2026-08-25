@@ -40,6 +40,41 @@ type Context struct {
 
 	valueMap  sync.Map
 	SetupTask bool // 是否安装task
+
+	groupMemberProvider GroupMemberProvider // 群成员提供者，v3 引擎下把群 CMD 改成定向投递时用
+	callInvitePusher    CallInvitePusher    // 来电离线推送补偿，v3 引擎下 IM 不再回调 CMD 的 msg.offline
+}
+
+// GroupMemberProvider 返回群 groupNo 当前的全部有效成员 uid。
+//
+// 只在 WuKongIM v3 引擎下用于把群 CMD 改写成 subscribers 定向投递。
+// 返回空切片表示「这个群不走定向投递」（例如成员太多的超级群），
+// 调用方会退回原来的频道投递方式。不注入时行为完全不变。
+type GroupMemberProvider func(groupNo string) ([]string, error)
+
+// SetGroupMemberProvider 注入群成员提供者。lib 不直接碰 group_member 表，
+// 由各产品的 server 层决定怎么查、以及哪些群不适合定向投递。
+func (c *Context) SetGroupMemberProvider(provider GroupMemberProvider) {
+	c.groupMemberProvider = provider
+}
+
+// CallInvitePusher 来电邀请离线推送补偿。
+//
+// v2 引擎对所有消息（含 SyncOnce/NoPersist 的 CMD）都会回调 msg.offline，
+// 被叫离线时业务侧据此推「您收到新的来电」；v3 引擎只对已持久化且非 SyncOnce
+// 的消息发离线回调，来电邀请（room.invoke CMD）走实时定向投递，被叫离线就彻底
+// 收不到推送。由推送模块注入实现（内部自行判定被叫是否离线），音视频模块在
+// 发完邀请 CMD 后调用。不注入时行为不变（不补偿）。
+type CallInvitePusher func(fromUID string, toUID string, callType int)
+
+// SetCallInvitePusher 注入来电离线推送补偿实现
+func (c *Context) SetCallInvitePusher(pusher CallInvitePusher) {
+	c.callInvitePusher = pusher
+}
+
+// GetCallInvitePusher 获取来电离线推送补偿实现，未注入时返回 nil
+func (c *Context) GetCallInvitePusher() CallInvitePusher {
+	return c.callInvitePusher
 }
 
 // NewContext NewContext
