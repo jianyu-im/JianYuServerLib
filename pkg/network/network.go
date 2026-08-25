@@ -92,20 +92,21 @@ func GetJson(url string, queryParams map[string]string, headers map[string]strin
 	return []byte(response.Body), nil
 }
 
+// PostForWWWFormForBytres 以 application/x-www-form-urlencoded 提交表单
+//
+// 2026-08-25 修复：原实现构造了 url.Values 却弃之不用，改用 fmt.Sprintf 手工拼
+// "k=v&" —— 值完全不做百分号编码。只要任意一个值里出现 '%'（消息正文里的涨跌幅
+// "1.55%" 最常见），接收端按 urlencoded 解码就会遇到非法转义序列，把**整个表单**
+// 判为解析失败：小米返回 65011 "Title or Description is empty"、OPPO 返回 41
+// "Invalid Arguments"，线上每天因此丢掉约 2.3 万条离线推送。
+// url.Values.Encode() 会正确编码每个值，同时对纯 ASCII 参数（OAuth 的
+// client_id/secret、签名 hex 串）输出与原来完全一致，因此对其余调用方无行为变化。
 func PostForWWWFormForBytres(urlStr string, params map[string]string, headers map[string]string) ([]byte, error) {
 	data := url.Values{}
 	for key, value := range params {
 		data.Set(key, value)
 	}
-	queryStr := ""
-
-	for key, value := range params {
-		queryStr = fmt.Sprintf("%s=%s&%s", key, value, queryStr)
-	}
-	if len(queryStr) > 0 {
-		queryStr = queryStr[0 : len(queryStr)-1]
-	}
-	request, err := http.NewRequest("POST", urlStr, strings.NewReader(queryStr))
+	request, err := http.NewRequest("POST", urlStr, strings.NewReader(data.Encode()))
 	if err != nil {
 		return nil, err
 	}
