@@ -315,3 +315,59 @@ func TestIMSyncUserConversationV3BackfillsUnreadConversationsBeyondRecentWindow(
 		t.Fatal("zero-unread conversation outside the window must not be backfilled")
 	}
 }
+
+// 频道整体缺失的重建契约：探测报 channel not found → 按业务成员投影全员 →
+// 补种子消息立日志（无日志频道会被会话水合当已删除丢弃）→ 激活。
+func TestIMSyncUserConversationV3RebuildsMissingChannelWithSeedMessage(t *testing.T) {
+	var mu sync.Mutex
+	var projectedUIDs []string
+	seedSends := 0
+	activations := 0
+	ctx := newConvSyncV3Context(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/conversation/list":
+			_, _ = w.Write([]byte(`{"conversations":[],"done":true}`))
+		case "/channel/messagesync":
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"msg":"internal/message: channel not found: channel: channel not found"}`))
+		case "/channel/subscriber_add":
+			var req struct {
+				Subscribers    []string `json:"subscribers"`
+				HistoryVisible int      `json:"history_visible"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			mu.Lock()
+			projectedUIDs = append(projectedUIDs, req.Subscribers...)
+			mu.Unlock()
+			_, _ = w.Write([]byte(`{}`))
+		case "/message/send":
+			mu.Lock()
+			seedSends++
+			mu.Unlock()
+			_, _ = w.Write([]byte(`{"message_id":1,"message_seq":1,"reason":1}`))
+		case "/conversations/activate":
+			mu.Lock()
+			activations++
+			mu.Unlock()
+			_, _ = w.Write([]byte(`{}`))
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	ctx.SetGroupMemberProvider(func(groupNo string) ([]string, error) {
+		return []string{"sync_u8", "member_b", "member_c"}, nil
+	})
+	if _, err := ctx.IMSyncUserConversation("sync_u8", 0, 1, "", []*Channel{{ChannelID: "g_missing", ChannelType: 2, HistoryVisible: 1}}); err != nil {
+		t.Fatalf("IMSyncUserConversation() error = %v", err)
+	}
+	if len(projectedUIDs) != 3 {
+		t.Fatalf("projected uids = %v, want all 3 business members", projectedUIDs)
+	}
+	if seedSends != 1 {
+		t.Fatalf("seed sends = %d, want exactly one invisible seed message", seedSends)
+	}
+	if activations != 1 {
+		t.Fatalf("activations = %d, want 1", activations)
+	}
+}

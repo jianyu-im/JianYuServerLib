@@ -735,6 +735,12 @@ func (c *Context) repairGroupConversationV3(uid string, group Channel) error {
 		if err := c.projectGroupMembersV3(members, group); err != nil {
 			return fmt.Errorf("rebuild missing channel: %w", err)
 		}
+		// 投影只建成员关系，消息日志要靠第一条 append 才存在；无日志的频道会被
+		// 会话水合当「已删除」丢弃，群永远进不了列表（2026-08-25 SY079 现场）。
+		// 补一条不可见的持久化种子消息（type=99，三端都不渲染）把日志立起来。
+		if err := c.seedChannelLogV3(group.ChannelID, group.ChannelType); err != nil {
+			return fmt.Errorf("seed rebuilt channel log: %w", err)
+		}
 	default:
 		return probeErr
 	}
@@ -760,6 +766,24 @@ func (c *Context) rawMessageSyncProbeV3(loginUID, channelID string, channelType 
 		return err
 	}
 	return c.handlerIMError(resp)
+}
+
+// seedChannelLogV3 给重建出来的空频道补一条不可见的持久化种子消息（type=99，
+// 客户端过滤不渲染、red_dot=0 不计未读），让消息日志与会话水合成立。
+func (c *Context) seedChannelLogV3(channelID string, channelType uint8) error {
+	payload := []byte(util.ToJson(map[string]interface{}{
+		"type": 99,
+		"cmd":  "jy_channel_seed",
+		"param": map[string]interface{}{},
+	}))
+	_, err := c.SendMessageWithResult(&MsgSendReq{
+		Header:      MsgHeader{NoPersist: 0, RedDot: 0, SyncOnce: 0},
+		FromUID:     c.cfg.Account.SystemUID,
+		ChannelID:   channelID,
+		ChannelType: channelType,
+		Payload:     payload,
+	})
+	return err
 }
 
 func (c *Context) projectGroupMembersV3(uids []string, group Channel) error {
