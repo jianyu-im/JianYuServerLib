@@ -574,6 +574,12 @@ func (c *Context) imSyncUserConversationV3(uid string, version int64, msgCount i
 					filtered = append(filtered, m)
 				}
 				if len(filtered) > 0 {
+					// v2 契约：recents 最新在前（recents[0] 就是会话最新一条），三端 SDK 与
+					// winds 内核都按此消费（kernel-bin/business.rs 拿 parsed_recents.first()
+					// 当会话末条时间戳与 client_msg_no）；而 v3 /channel/messagesync 返回的是
+					// 升序，直接透传会把「补拉窗口里最老的一条」当成会话预览与排序锚点
+					//（现场：会话列表末条显示十几天前的老消息、列表整体乱序）。
+					sort.Slice(filtered, func(i, j int) bool { return filtered[i].MessageSeq > filtered[j].MessageSeq })
 					conv.Recents = filtered
 				}
 			}

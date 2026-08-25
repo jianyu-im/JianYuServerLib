@@ -293,7 +293,11 @@ func TestIMSyncUserConversationV3BackfillsUnreadConversationsBeyondRecentWindow(
 			mu.Lock()
 			synced[req.ChannelID] = true
 			mu.Unlock()
-			_, _ = w.Write([]byte(`{"messages":[{"header":{},"message_id":1,"message_idstr":"1","message_seq":9,"client_msg_no":"real-x","from_uid":"u2","channel_id":"` + req.ChannelID + `","channel_type":2,"timestamp":1700000000,"payload":"eyJ0eXBlIjoxfQ=="}]}`))
+			// v3 /channel/messagesync 返回升序（最老在前），刻意照实模拟
+			_, _ = w.Write([]byte(`{"messages":[` +
+				`{"header":{},"message_id":1,"message_idstr":"1","message_seq":7,"client_msg_no":"real-old","from_uid":"u2","channel_id":"` + req.ChannelID + `","channel_type":2,"timestamp":1700000000,"payload":"eyJ0eXBlIjoxfQ=="},` +
+				`{"header":{},"message_id":2,"message_idstr":"2","message_seq":9,"client_msg_no":"real-x","from_uid":"u2","channel_id":"` + req.ChannelID + `","channel_type":2,"timestamp":1700000002,"payload":"eyJ0eXBlIjoxfQ=="}` +
+				`]}`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -313,6 +317,21 @@ func TestIMSyncUserConversationV3BackfillsUnreadConversationsBeyondRecentWindow(
 	}
 	if synced["g1"] {
 		t.Fatal("zero-unread conversation outside the window must not be backfilled")
+	}
+	// v2 契约：补拉下发的 recents 必须最新在前，recents[0] 就是会话最新一条。
+	// v3 messagesync 是升序，升序透传会让各端把窗口里最老那条当成会话末条
+	//（列表预览显示老消息、winds 按 recents[0] 时间戳排序整列表乱序）。
+	for _, conv := range got {
+		if len(conv.Recents) < 2 {
+			continue
+		}
+		if conv.Recents[0].MessageSeq != 9 || conv.Recents[1].MessageSeq != 7 {
+			t.Fatalf("%s recents = seq %d,%d, want newest-first 9,7",
+				conv.ChannelID, conv.Recents[0].MessageSeq, conv.Recents[1].MessageSeq)
+		}
+		if int64(conv.Recents[0].MessageSeq) != conv.LastMsgSeq {
+			t.Fatalf("%s recents[0] seq %d != last_msg_seq %d", conv.ChannelID, conv.Recents[0].MessageSeq, conv.LastMsgSeq)
+		}
 	}
 }
 
