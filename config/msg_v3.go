@@ -658,7 +658,7 @@ func (c *Context) imSyncUserConversationV3(uid string, msgCount int64, lastMsgSe
 		results = append(results, item)
 	}
 	c.backfillUnreadConversationRecentsV3(uid, int(msgCount), results)
-	return c.backfillKnownPersonConversationsV3(uid, lastMsgSeqs, int(msgCount), results)
+	return c.backfillKnownPersonConversationsV3(uid, lastMsgSeqs, int(msgCount), results), nil
 }
 
 // v3RecentsBackfillMax 单次会话同步给未读会话补拉历史的会话数上限。
@@ -713,6 +713,11 @@ func (c *Context) backfillUnreadConversationRecentsV3(uid string, msgCount int, 
 			filtered = append(filtered, m)
 		}
 		if len(filtered) > 0 {
+			// v2 契约：recents 最新在前（v2 对 orderByLast 结果做 sort.Reverse 后下发），
+			// 三端 SDK 与 winds 内核都拿 recents[0] 当会话最新一条；v3 messagesync 返回的是
+			// 升序，直接透传会让「窗口里最老的一条」被当成会话预览/排序锚点
+			//（2026-08-25 现场：会话列表末条显示 18 天前的老消息、winds 列表整体乱序）。
+			sort.Slice(filtered, func(i, j int) bool { return filtered[i].MessageSeq > filtered[j].MessageSeq })
 			conv.Recents = filtered
 		}
 	}
@@ -935,10 +940,16 @@ type channelMessageSyncBatchResponseV3 struct {
 // conversations missing from the membership-backed directory. Message bytes
 // still come from WuKongIM's authoritative channel log; last_msg_seqs merely
 // bounds the candidate set and supplies the client's local read anchor.
-func (c *Context) backfillKnownPersonConversationsV3(uid, lastMsgSeqs string, msgCount int, results []*SyncUserConversationResp) ([]*SyncUserConversationResp, error) {
+//
+// 与群对账同理必须 fail-open：单个补不出来的单聊只该缺它自己，绝不能拖垮整张会话列表。
+// 2026-08-25 上午的 fail-closed 版本线上表现为：客户端 last_msg_seqs 里带着 v3 引擎不认识
+// 的频道（典型是 fake channel a@b）时 messagesyncbatch 返回 channel not found，本函数
+// return error 让整个 /v1/conversation/sync 恒定失败（「同步离线后的最近会话失败」半天 77 次，
+// 涉及 uid 每次同步全军覆没）。补不出来的锚点留给下一次 sync 继续试。
+func (c *Context) backfillKnownPersonConversationsV3(uid, lastMsgSeqs string, msgCount int, results []*SyncUserConversationResp) []*SyncUserConversationResp {
 	anchors := parseConversationSyncAnchorsV3(lastMsgSeqs)
 	if len(anchors) == 0 {
-		return results, nil
+		return results
 	}
 	existing := make(map[string]struct{}, len(results))
 	for _, conversation := range results {
@@ -957,7 +968,7 @@ func (c *Context) backfillKnownPersonConversationsV3(uid, lastMsgSeqs string, ms
 		missing = append(missing, anchor)
 	}
 	if len(missing) == 0 {
-		return results, nil
+		return results
 	}
 
 	limit := msgCountForConversationBackfillV3(msgCount)
@@ -974,29 +985,34 @@ func (c *Context) backfillKnownPersonConversationsV3(uid, lastMsgSeqs string, ms
 			"login_uid": uid, "items": items,
 		})), nil)
 		if err != nil {
-			return nil, err
+			c.Warn("v3单聊会话补拉批次请求失败，跳过该批", zap.String("uid", uid), zap.Int("batch_start", start), zap.Error(err))
+			continue
 		}
 		if err := c.handlerIMError(resp); err != nil {
-			return nil, err
+			c.Warn("v3单聊会话补拉批次IM返回错误，跳过该批", zap.String("uid", uid), zap.Int("batch_start", start), zap.Error(err))
+			continue
 		}
 		var batchResp channelMessageSyncBatchResponseV3
 		if err := util.ReadJsonByByte([]byte(resp.Body), &batchResp); err != nil {
-			return nil, err
+			c.Warn("v3单聊会话补拉批次响应解析失败，跳过该批", zap.String("uid", uid), zap.Int("batch_start", start), zap.Error(err))
+			continue
 		}
 		if len(batchResp.Items) != len(items) {
-			return nil, fmt.Errorf("v3 person conversation backfill returned %d items, want %d", len(batchResp.Items), len(items))
+			c.Warn("v3单聊会话补拉批次条数不符，跳过该批", zap.String("uid", uid), zap.Int("batch_start", start), zap.Int("got", len(batchResp.Items)), zap.Int("want", len(items)))
+			continue
 		}
 		for index, item := range batchResp.Items {
 			anchor := missing[start+index]
 			if item.Error != "" {
-				return nil, fmt.Errorf("v3 person conversation backfill failed for %s: %s", anchor.ChannelID, item.Error)
+				c.Warn("v3单聊会话补拉单条失败，缺该会话降级返回", zap.String("uid", uid), zap.String("channel_id", anchor.ChannelID), zap.String("im_error", item.Error))
+				continue
 			}
-			if conversation := conversationFromBackfillMessagesV3(uid, anchor, item.Messages); conversation != nil {
+			if conversation := conversationFromBackfillMessagesV3(uid, anchor, item.Messages, msgCount); conversation != nil {
 				results = append(results, conversation)
 			}
 		}
 	}
-	return results, nil
+	return results
 }
 
 func msgCountForConversationBackfillV3(requested int) int {
@@ -1040,7 +1056,7 @@ func parseConversationSyncAnchorsV3(value string) []conversationSyncAnchorV3 {
 	return anchors
 }
 
-func conversationFromBackfillMessagesV3(uid string, anchor conversationSyncAnchorV3, messages []*MessageResp) *SyncUserConversationResp {
+func conversationFromBackfillMessagesV3(uid string, anchor conversationSyncAnchorV3, messages []*MessageResp, msgCount int) *SyncUserConversationResp {
 	recents := make([]*MessageResp, 0, len(messages))
 	var latest *MessageResp
 	unread := 0
@@ -1068,7 +1084,14 @@ func conversationFromBackfillMessagesV3(uid string, anchor conversationSyncAncho
 	if latest == nil {
 		return nil
 	}
-	sort.Slice(recents, func(i, j int) bool { return recents[i].MessageSeq < recents[j].MessageSeq })
+	// v2 契约：recents 最新在前，recents[0] 必须是会话最新一条（各端与 winds 内核都按此消费）。
+	// 未读数已在上面用完整窗口算完，这里再按客户端请求的 msg_count 截断——winds 每会话只要
+	// 2 条且对 >20 条的会话**整批拒收**（kernel-bin/business.rs 的 recents.len()>20 闸门），
+	// 回填窗口的下限却是 50 条，不截断会把 winds 的整个会话同步搞挂。
+	sort.Slice(recents, func(i, j int) bool { return recents[i].MessageSeq > recents[j].MessageSeq })
+	if msgCount > 0 && len(recents) > msgCount {
+		recents = recents[:msgCount]
+	}
 	return &SyncUserConversationResp{
 		ChannelID: anchor.ChannelID, ChannelType: anchor.ChannelType,
 		Unread: unread, Timestamp: int64(latest.Timestamp), LastMsgSeq: int64(latest.MessageSeq),

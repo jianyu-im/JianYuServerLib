@@ -294,8 +294,55 @@ func TestIMSyncUserConversationV3BackfillsClientKnownPersonMissingFromDirectory(
 	if conv.Unread != 2 {
 		t.Fatalf("unread = %d, want two peer messages after local seq 4", conv.Unread)
 	}
-	if len(conv.Recents) != 3 || conv.Recents[0].MessageSeq != 3 || conv.Recents[2].MessageSeq != 6 {
-		t.Fatalf("recents = %+v, want recovered seq 3,5,6", conv.Recents)
+	// v2 契约：recents 最新在前（recents[0] 是会话最新一条），并按客户端 msg_count(=1) 截断。
+	// 2026-08-25 现场：升序透传让各端把窗口最老一条当成会话末条（列表预览显示 18 天前的老消息、
+	// winds 整列表乱序），winds 还会对 >20 条的 recents 整批拒收。
+	if len(conv.Recents) != 1 || conv.Recents[0].MessageSeq != 6 {
+		t.Fatalf("recents = %+v, want newest-first truncated to msg_count=1 (seq 6)", conv.Recents)
+	}
+}
+
+func TestIMSyncUserConversationV3PersonBackfillFailsOpenOnChannelNotFound(t *testing.T) {
+	// 2026-08-25 线上事故回归：客户端 last_msg_seqs 里带着 v3 引擎不认识的 fake channel（a@b），
+	// messagesyncbatch 对该条返回 channel not found，此时只该缺这一个会话，
+	// 其余会话（目录里已有的 + 能补出来的单聊）必须原样返回，整个 sync 不能失败。
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/conversation/list":
+			_, _ = w.Write([]byte(`{"conversations":[{"channel_id":"u9","channel_type":1,"active_at":1000000,"unread":0,"last_message":{"message_id":2,"message_idstr":"2","message_seq":2,"from_uid":"u9","client_msg_no":"m2","server_timestamp_ms":1002000,"payload":"e30="}}],"done":true,"coverage":10}`))
+		case "/channel/messagesyncbatch":
+			_, _ = w.Write([]byte(`{"items":[` +
+				`{"channel_id":"a@b","channel_type":1,"error":"channel not found"},` +
+				`{"channel_id":"u2","channel_type":1,"messages":[{"header":{"red_dot":1},"message_id":6,"message_idstr":"6","message_seq":6,"client_msg_no":"m6","from_uid":"u2","channel_id":"u2","channel_type":1,"timestamp":1006,"payload":"e30="}]}` +
+				`]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	cfg := New()
+	cfg.WuKongIM.APIURL = server.URL
+	cfg.WuKongIM.Engine = "v3"
+	ctx := &Context{cfg: cfg, Log: log.NewTLog("test")}
+
+	got, err := ctx.IMSyncUserConversation("u1", 0, 1, "a@b:1:4|u2:1:4", nil)
+	if err != nil {
+		t.Fatalf("channel-not-found backfill must fail open, not fail the whole sync: %v", err)
+	}
+	byChannel := make(map[string]*SyncUserConversationResp, len(got))
+	for _, conv := range got {
+		byChannel[conv.ChannelID] = conv
+	}
+	if _, ok := byChannel["a@b"]; ok {
+		t.Fatalf("conversations = %+v, fake channel a@b must be dropped, not fabricated", got)
+	}
+	if _, ok := byChannel["u9"]; !ok {
+		t.Fatalf("conversations = %+v, directory conversation u9 must survive", got)
+	}
+	if conv, ok := byChannel["u2"]; !ok || conv.LastMsgSeq != 6 {
+		t.Fatalf("conversations = %+v, healthy backfill u2 must still land at seq 6", got)
 	}
 }
 
@@ -483,8 +530,9 @@ func TestIMSyncUserConversationV3BackfillsUnreadConversations(t *testing.T) {
 		if conv.ChannelID != "g0" {
 			continue
 		}
-		if len(conv.Recents) != 2 || conv.Recents[0].MessageSeq != 7 || conv.Recents[1].MessageSeq != 9 {
-			t.Fatalf("g0 recents = %+v, want backfilled seq 7,9", conv.Recents)
+		// v2 契约：recents 最新在前，recents[0] 必须是会话最新一条（各端与 winds 内核都按此消费）。
+		if len(conv.Recents) != 2 || conv.Recents[0].MessageSeq != 9 || conv.Recents[1].MessageSeq != 7 {
+			t.Fatalf("g0 recents = %+v, want backfilled newest-first seq 9,7", conv.Recents)
 		}
 	}
 }
