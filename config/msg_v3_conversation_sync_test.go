@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -250,5 +251,62 @@ func TestIMSyncUserConversationV3ResolvesPlaceholderTail(t *testing.T) {
 	}
 	if len(conv.Recents) != 1 || conv.Recents[0].ClientMsgNo != "real-7" {
 		t.Fatalf("recents = %+v, want the resolved real message", conv.Recents)
+	}
+}
+
+// 断线漏收契约：unread>0 的会话即使不在最近活跃 30 个里，也必须随会话同步补拉最近消息
+// （v2 语义；安卓不会主动补中间的洞，漏了就是「发五条只见一两条」）。
+func TestIMSyncUserConversationV3BackfillsUnreadConversationsBeyondRecentWindow(t *testing.T) {
+	var mu sync.Mutex
+	synced := map[string]bool{}
+	ctx := newConvSyncV3Context(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/conversation/list":
+			var sb []byte
+			sb = append(sb, []byte(`{"conversations":[`)...)
+			// 40 个会话：g0 最老且 unread=3，其余 unread=0
+			for i := 0; i < 40; i++ {
+				if i > 0 {
+					sb = append(sb, ',')
+				}
+				unread := 0
+				if i == 0 {
+					unread = 3
+				}
+				sb = append(sb, []byte(fmt.Sprintf(
+					`{"channel_id":"g%d","channel_type":2,"active_at":%d,"unread":%d,"last_message":{"message_id":%d,"message_idstr":"%d","message_seq":9,"from_uid":"u2","client_msg_no":"m%d","server_timestamp_ms":%d,"payload":"e30="}}`,
+					i, 1700000000000+int64(i)*1000, unread, i+1, i+1, i, 1700000000000+int64(i)*1000))...)
+			}
+			sb = append(sb, []byte(`],"done":true}`)...)
+			_, _ = w.Write(sb)
+		case "/channel/messagesync":
+			var req struct {
+				ChannelID string `json:"channel_id"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			mu.Lock()
+			synced[req.ChannelID] = true
+			mu.Unlock()
+			_, _ = w.Write([]byte(`{"messages":[{"header":{},"message_id":1,"message_idstr":"1","message_seq":9,"client_msg_no":"real-x","from_uid":"u2","channel_id":"` + req.ChannelID + `","channel_type":2,"timestamp":1700000000,"payload":"eyJ0eXBlIjoxfQ=="}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	got, err := ctx.IMSyncUserConversation("sync_u7", 0, 5, "", nil)
+	if err != nil {
+		t.Fatalf("IMSyncUserConversation() error = %v", err)
+	}
+	if len(got) != 40 {
+		t.Fatalf("conversations = %d, want 40", len(got))
+	}
+	if !synced["g0"] {
+		t.Fatal("unread conversation g0 outside the recent-30 window must be backfilled")
+	}
+	if !synced["g39"] || !synced["g10"] {
+		t.Fatal("recent-window conversations must still be backfilled")
+	}
+	if synced["g1"] {
+		t.Fatal("zero-unread conversation outside the window must not be backfilled")
 	}
 }

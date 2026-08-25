@@ -216,8 +216,17 @@ func (c *Context) scanLastRealMessageV3(loginUID, channelID string, channelType 
 // 的 maxListLimit），超过直接返回 invalid request，所以这里取上限 200。
 const v3ConversationPageLimit = 200
 
-// v3RecentsFetchLimit 一次会话同步里最多给多少个会话补拉多条历史（其余只给 last_message）。
+// v3RecentsFetchLimit 一次会话同步里按「最近活跃」补拉多条历史的会话数。
 const v3RecentsFetchLimit = 30
+
+// v3RecentsBackfillMax 单次会话同步补拉历史的会话总数上限（最近活跃 + 未读>0 的并集）。
+//
+// v2 的 /conversation/sync 会给每个有变更的会话带回 msgCount 条最近消息，断线期间漏收的
+// 消息全靠它带回；v3 适配层曾只给最近活跃 30 个补拉，其余会话只有 last_message 一条——
+// 安卓端不会主动补中间的洞，用户表现为「对方发了五条只能看见一两条」（2026-08-25 现场）。
+// 所以未读>0 的会话必须全部补拉；上限防止单个用户把一次同步放大成几百次 IM 调用
+// （messagesync 已是窗口化读取，单次成本低）。
+const v3RecentsBackfillMax = 100
 
 // v3MaxConversationPages 翻页上限，防止服务端游标异常时死循环。
 const v3MaxConversationPages = 200
@@ -494,16 +503,40 @@ func (c *Context) imSyncUserConversationV3(uid string, version int64, msgCount i
 	sort.Slice(result, func(i, j int) bool { return result[i].Version < result[j].Version })
 	// 需要多条最近消息时按频道补拉；msgCount<=1 时 last_message 已足够。
 	//
-	// 补拉是一个会话一次 /channel/messagesync，会话多的用户一次同步就是几百次 IM 调用，
-	// 和 /conversation/list 一起把 IM 的堆顶爆（2026-08-24 事故）。所以只给排在最后的
-	// v3RecentsFetchLimit 个（即最近活跃的）会话补拉，其余保留 last_message 那一条——
-	// 客户端翻到旧会话时本来也会按频道单独拉历史。
+	// 补拉是一个会话一次 /channel/messagesync。选择集合 = 最近活跃的 v3RecentsFetchLimit 个
+	// ∪ 所有 unread>0 的会话（v2 语义：断线期间漏收的消息随会话同步带回，安卓不会主动补
+	// 中间的洞，漏了就是用户口中的「发五条只见一两条」）。总量上限 v3RecentsBackfillMax，
+	// 且 messagesync 已窗口化，不会重演 2026-08-24 把 IM 堆顶爆的事故。
 	if msgCount > 1 {
 		start := 0
 		if len(result) > v3RecentsFetchLimit {
 			start = len(result) - v3RecentsFetchLimit
 		}
+		backfill := make([]*SyncUserConversationResp, 0, v3RecentsBackfillMax)
+		selected := make(map[*SyncUserConversationResp]struct{}, v3RecentsBackfillMax)
 		for _, conv := range result[start:] {
+			if len(backfill) >= v3RecentsBackfillMax {
+				break
+			}
+			selected[conv] = struct{}{}
+			backfill = append(backfill, conv)
+		}
+		for i := len(result) - 1; i >= 0; i-- { // 未读会话按最近活跃优先补
+			conv := result[i]
+			if conv.Unread <= 0 {
+				continue
+			}
+			if _, ok := selected[conv]; ok {
+				continue
+			}
+			if len(backfill) >= v3RecentsBackfillMax {
+				c.Warn("v3会话同步补拉达到上限，部分未读会话只带末条", zap.String("uid", uid), zap.Int("cap", v3RecentsBackfillMax))
+				break
+			}
+			selected[conv] = struct{}{}
+			backfill = append(backfill, conv)
+		}
+		for _, conv := range backfill {
 			if conv.LastMsgSeq <= 0 {
 				continue
 			}
