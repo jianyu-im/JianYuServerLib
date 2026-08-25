@@ -567,6 +567,9 @@ func (c *Config) ConfigureWithViper(vp *viper.Viper) {
 	}
 	c.External.WebLoginURL = c.getString("external.webLoginURL", c.External.WebLoginURL)
 	c.External.BaseURL = c.getString("external.baseURL", c.External.BaseURL)
+	// h5和api的基地址支持单独配置：h5页面可以走高防域名，而文件上传等api仍走源站直连
+	c.External.H5BaseURL = c.getString("external.h5BaseURL", c.External.H5BaseURL)
+	c.External.APIBaseURL = c.getString("external.apiBaseURL", c.External.APIBaseURL)
 
 	if strings.TrimSpace(c.External.WebLoginURL) == "" {
 		c.External.WebLoginURL = fmt.Sprintf("http://%s:82", c.External.IP)
