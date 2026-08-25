@@ -41,6 +41,9 @@ func TestIMSyncUserConversationV3FreshInstallReconcilesBusinessGroups(t *testing
 				return
 			}
 			_, _ = w.Write([]byte(`{"conversations":[{"channel_id":"g1","channel_type":2,"active_at":1000000,"unread":1,"last_message":{"message_id":8,"message_idstr":"8","message_seq":8,"from_uid":"u2","client_msg_no":"m8","server_timestamp_ms":1008000,"payload":"e30="}}],"done":true}`))
+		case "/channel/messagesync":
+			// 对账探测：membership 在，返回一条消息
+			_, _ = w.Write([]byte(`{"messages":[{"header":{},"message_id":8,"message_idstr":"8","message_seq":8,"client_msg_no":"m8","from_uid":"u2","channel_id":"g1","channel_type":2,"timestamp":1008,"payload":"e30="}]}`))
 		case "/conversations/activate":
 			var req struct {
 				UID         string `json:"uid"`
@@ -92,16 +95,14 @@ func TestIMSyncUserConversationV3RebuildsMissingMembershipWithHistoryPolicy(t *t
 				return
 			}
 			_, _ = w.Write([]byte(`{"conversations":[{"channel_id":"g1","channel_type":2,"active_at":1000000,"last_message":{"message_id":3,"message_idstr":"3","message_seq":3,"from_uid":"u2","client_msg_no":"m3","server_timestamp_ms":1003000,"payload":"e30="}}],"done":true}`))
+		case "/channel/messagesync":
+			// 对账探测：频道在、本人缺行（activate 是异步提案恒 200，不能作判据）
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"msg":"internal/message: valid channel membership required"}`))
 		case "/conversations/activate":
 			mu.Lock()
 			activationCalls++
-			call := activationCalls
 			mu.Unlock()
-			if call == 1 {
-				w.WriteHeader(http.StatusBadRequest)
-				_, _ = w.Write([]byte(`{"msg":"meta: not found"}`))
-				return
-			}
 			_, _ = w.Write([]byte(`{}`))
 		case "/channel/subscriber_add":
 			var req struct {
@@ -129,8 +130,8 @@ func TestIMSyncUserConversationV3RebuildsMissingMembershipWithHistoryPolicy(t *t
 	if err != nil {
 		t.Fatalf("IMSyncUserConversation() error = %v", err)
 	}
-	if activationCalls != 2 || projectionCalls != 1 || listCalls != 2 {
-		t.Fatalf("activation/projection/list calls = %d/%d/%d, want 2/1/2", activationCalls, projectionCalls, listCalls)
+	if activationCalls != 1 || projectionCalls != 1 || listCalls != 2 {
+		t.Fatalf("activation/projection/list calls = %d/%d/%d, want 1/1/2", activationCalls, projectionCalls, listCalls)
 	}
 	if len(got) != 1 || got[0].ChannelID != "g1" || got[0].LastMsgSeq != 3 {
 		t.Fatalf("conversations = %+v, want rebuilt g1", got)
@@ -173,6 +174,8 @@ func TestIMSyncUserConversationV3FailsOpenWhenBusinessGroupActivationFails(t *te
 			listCalls++
 			mu.Unlock()
 			_, _ = w.Write([]byte(`{"conversations":[{"channel_id":"g0","channel_type":2,"active_at":0,"unread":0,"last_message":{"message_id":1,"message_idstr":"1","message_seq":5,"from_uid":"u2","client_msg_no":"real-1","server_timestamp_ms":1700000000000,"payload":"eyJ0eXBlIjoxfQ=="}}],"done":true}`))
+		case "/channel/messagesync":
+			_, _ = w.Write([]byte(`{"messages":[{"header":{},"message_id":1,"message_idstr":"1","message_seq":5,"client_msg_no":"real-1","from_uid":"u2","channel_id":"g1","channel_type":2,"timestamp":1700000000,"payload":"e30="}]}`))
 		case "/conversations/activate":
 			w.WriteHeader(http.StatusServiceUnavailable)
 			_, _ = w.Write([]byte(`{"msg":"retry required"}`))
@@ -203,6 +206,8 @@ func TestIMSyncUserConversationV3FailsOpenWhenRepairedGroupIsStillAbsent(t *test
 			listCalls++
 			mu.Unlock()
 			_, _ = w.Write([]byte(`{"conversations":[],"done":true}`))
+		case "/channel/messagesync":
+			_, _ = w.Write([]byte(`{"messages":[{"header":{},"message_id":1,"message_idstr":"1","message_seq":3,"client_msg_no":"real-1","from_uid":"u2","channel_id":"g1","channel_type":2,"timestamp":1700000000,"payload":"e30="}]}`))
 		case "/conversations/activate":
 			_, _ = w.Write([]byte(`{}`))
 		default:

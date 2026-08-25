@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/jianyu-im/JianYuServerLib/common"
 	"github.com/jianyu-im/JianYuServerLib/pkg/network"
@@ -580,10 +581,23 @@ func (c *Context) IMSyncChannelMessage(req SyncChannelMessageReq) (*SyncChannelM
 	}
 	err = c.handlerIMError(resp)
 	if err != nil {
+		// 单聊的 membership required 可能是目录投影丢了一侧（真实历史在、行没了），
+		// 先触发引擎补行再重试一次；补不上才降级
+		if c.IMV3Enabled() && req.ChannelType == common.ChannelTypePerson.Uint8() &&
+			isMembershipRequiredErrV3(err) && c.repairPersonMembershipV3(req.LoginUID, req.ChannelID) {
+			time.Sleep(300 * time.Millisecond) // 等 raft apply 落盘
+			if retryResp, retryErr := network.Post(c.cfg.WuKongIM.APIURL+"/channel/messagesync", []byte(util.ToJson(req)), nil); retryErr == nil {
+				if retryErr = c.handlerIMError(retryResp); retryErr == nil {
+					resp, err = retryResp, nil
+				}
+			}
+		}
+	}
+	if err != nil {
 		// v3 里「频道不存在」是以成员校验失败的形式返回的，降级成空时间线，
 		// 否则客户端打开系统号单聊或废弃群时会直接报错打不开
 		if c.IMV3Enabled() && isChannelAbsentErrV3(err) {
-			c.Warn("v3频道无时间线，按空结果返回", zap.String("channel_id", req.ChannelID), zap.Uint8("channel_type", req.ChannelType), zap.Error(err))
+			c.Warn("v3频道无时间线，按空结果返回", zap.String("login_uid", req.LoginUID), zap.String("channel_id", req.ChannelID), zap.Uint8("channel_type", req.ChannelType), zap.Error(err))
 			return emptySyncChannelMessageRespV3(req.StartMessageSeq, req.EndMessageSeq, req.PullMode), nil
 		}
 		return nil, err

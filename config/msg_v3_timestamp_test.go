@@ -39,3 +39,18 @@ func TestConversationTimestampV3MixedUnits(t *testing.T) {
 		t.Errorf("conversationTimestampV3(0, 0) = %d, want 0", got)
 	}
 }
+
+// winds 防回退闸门契约：会话 version 必须是 v2 的纳秒量纲（本地水位 ~1.787e18），
+// 下发 0/秒级值会让 winds 每次会话同步被整批 StaleSync 丢弃、列表冻结。
+func TestConversationVersionNSV3RestoresNanosecondScale(t *testing.T) {
+	lastMS := int64(1787559084112) // 2026-08-24 的毫秒
+	if got := conversationVersionNSV3(0, lastMS); got != lastMS*1e6 {
+		t.Fatalf("conversationVersionNSV3 = %d, want %d (纳秒)", got, lastMS*1e6)
+	}
+	if got := conversationVersionNSV3(0, lastMS); got < int64(1.7e18) {
+		t.Fatalf("version %d 低于 v2 水位量纲(~1.787e18)，winds 会整批丢弃", got)
+	}
+	if got := conversationVersionNSV3(0, 0); got != 0 {
+		t.Fatalf("空会话 version = %d, want 0", got)
+	}
+}
