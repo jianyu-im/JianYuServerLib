@@ -569,11 +569,24 @@ func (c *Context) IMSyncChannelMessage(req SyncChannelMessageReq) (*SyncChannelM
 	}
 	err = c.handlerIMError(resp)
 	if err != nil {
+		// 单聊的 membership required 可能是目录投影丢了一侧（真实历史在、行没了），
+		// 先触发引擎补行再重试一次；补不上才报错
+		if c.imEngineV3() && req.ChannelType == common.ChannelTypePerson.Uint8() &&
+			isMembershipRequiredErrV3(err) && c.repairPersonMembershipV3(req.LoginUID, req.ChannelID) {
+			time.Sleep(300 * time.Millisecond) // 等 raft apply 落盘
+			if retryResp, retryErr := network.Post(c.cfg.WuKongIM.APIURL+"/channel/messagesync", []byte(util.ToJson(req)), nil); retryErr == nil {
+				if retryErr = c.handlerIMError(retryResp); retryErr == nil {
+					resp, err = retryResp, nil
+				}
+			}
+		}
+	}
+	if err != nil {
 		// v3 的废弃群/不存在频道可降级成空时间线；但单聊的 membership
 		// required 也可能只是异步目录投影延迟，不能把真实历史伪装成空。
 		if c.imEngineV3() && isChannelAbsentErrV3(err) &&
 			!(req.ChannelType == common.ChannelTypePerson.Uint8() && isMembershipRequiredErrV3(err)) {
-			c.Warn("v3频道无时间线，按空结果返回", zap.String("channel_id", req.ChannelID), zap.Uint8("channel_type", req.ChannelType), zap.Error(err))
+			c.Warn("v3频道无时间线，按空结果返回", zap.String("login_uid", req.LoginUID), zap.String("channel_id", req.ChannelID), zap.Uint8("channel_type", req.ChannelType), zap.Error(err))
 			return emptySyncChannelMessageRespV3(req), nil
 		}
 		return nil, err

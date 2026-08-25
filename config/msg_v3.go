@@ -657,7 +657,65 @@ func (c *Context) imSyncUserConversationV3(uid string, msgCount int64, lastMsgSe
 		}
 		results = append(results, item)
 	}
+	c.backfillUnreadConversationRecentsV3(uid, int(msgCount), results)
 	return c.backfillKnownPersonConversationsV3(uid, lastMsgSeqs, int(msgCount), results)
+}
+
+// v3RecentsBackfillMax 单次会话同步给未读会话补拉历史的会话数上限。
+//
+// v2 的 /conversation/sync 会给每个有变更的会话带回 msgCount 条最近消息，断线期间漏收的
+// 消息全靠它带回；v3 适配层此前每个会话只带 last_message 一条——安卓端不会主动补中间的洞
+// （离线消息监听器只处理 CMD 队列、开聊天页也不保证回拉），用户表现为「对方发了五条只能
+// 看见一两条」（2026-08-25 简语现场，服务端单方面修复、客户端零升级）。上限防止单个用户
+// 把一次同步放大成几百次 IM 调用（messagesync 已是窗口化读取，单次成本低）。
+const v3RecentsBackfillMax = 100
+
+// backfillUnreadConversationRecentsV3 给 unread>0 的会话补拉最近 msgCount 条消息，
+// 按最近活跃优先、总量封顶 v3RecentsBackfillMax；补拉失败或全是占位消息时保留原有的
+// last_message 那一条，绝不清空 Recents（单聊空 Recents 会被下游闸门整条丢弃）。
+func (c *Context) backfillUnreadConversationRecentsV3(uid string, msgCount int, results []*SyncUserConversationResp) {
+	if msgCount <= 1 || len(results) == 0 {
+		return
+	}
+	candidates := make([]*SyncUserConversationResp, 0, len(results))
+	for _, conv := range results {
+		if conv != nil && conv.Unread > 0 && conv.LastMsgSeq > 0 {
+			candidates = append(candidates, conv)
+		}
+	}
+	if len(candidates) == 0 {
+		return
+	}
+	sort.SliceStable(candidates, func(i, j int) bool { return candidates[i].Timestamp > candidates[j].Timestamp })
+	if len(candidates) > v3RecentsBackfillMax {
+		c.Warn("v3会话同步补拉达到上限，部分未读会话只带末条", zap.String("uid", uid), zap.Int("unread_convs", len(candidates)), zap.Int("cap", v3RecentsBackfillMax))
+		candidates = candidates[:v3RecentsBackfillMax]
+	}
+	for _, conv := range candidates {
+		recents, err := c.IMSyncChannelMessage(SyncChannelMessageReq{
+			LoginUID:        uid,
+			ChannelID:       conv.ChannelID,
+			ChannelType:     conv.ChannelType,
+			StartMessageSeq: uint32(conv.LastMsgSeq),
+			EndMessageSeq:   0,
+			Limit:           msgCount,
+			PullMode:        PullModeDown,
+		})
+		if err != nil || recents == nil || len(recents.Messages) == 0 {
+			continue
+		}
+		// 补拉窗口里也可能混着迁移占位消息（seqpad），过滤掉；全被过滤时保留原 Recents
+		filtered := make([]*MessageResp, 0, len(recents.Messages))
+		for _, m := range recents.Messages {
+			if m == nil || isSeqPadMessage(m.ClientMsgNo) {
+				continue
+			}
+			filtered = append(filtered, m)
+		}
+		if len(filtered) > 0 {
+			conv.Recents = filtered
+		}
+	}
 }
 
 // reconcileExpectedGroupConversationsV3 compares the business-authoritative
@@ -740,46 +798,107 @@ func missingExpectedGroupConversationsV3(expected []*Channel, rows []conversatio
 	return missing
 }
 
-// repairGroupConversationV3 preserves an existing membership's original join
-// floor whenever possible. Only the explicit not-found case falls back to the
-// channel subscriber projection, which creates the missing UID-owned row using
-// the business group's history policy, before activation is retried.
+// repairGroupConversationV3 修复目录缺行的群会话。
+//
+// 关键事实（2026-08-25 简语线上实测）：v3 的 /conversations/activate 是 raft 异步提案，
+// FSM apply 撞 ErrNotFound 不会回传，HTTP 永远 200——「activate 成败」不能作为
+// membership 是否存在的判据（旧实现靠它分流，坏例永远修不上）。所以先用一次
+// 裸 messagesync 探测真实状态，按结果决定投影范围，最后 activate 只做提优先级。
 func (c *Context) repairGroupConversationV3(uid string, group Channel) error {
-	err := c.activateConversationV3(uid, group.ChannelID, group.ChannelType)
-	if err == nil {
-		return nil
-	}
-	if !isMissingConversationMembershipV3(err) {
-		return err
-	}
-	if err := c.projectGroupMembershipV3(uid, group); err != nil {
-		return fmt.Errorf("project missing membership: %w", err)
+	probeErr := c.rawMessageSyncProbeV3(uid, group.ChannelID, group.ChannelType)
+	switch {
+	case probeErr == nil:
+		// membership 在，只是目录读没带出来（或 activated_at 缺）：提优先级即可
+	case isMembershipRequiredErrV3(probeErr):
+		// 频道在、本人缺行：投影本人
+		if err := c.projectGroupMembersV3([]string{uid}, group); err != nil {
+			return fmt.Errorf("project missing membership: %w", err)
+		}
+	case strings.Contains(probeErr.Error(), "channel not found"):
+		// 频道在 v3 里整个不存在（迁移漏建/契约期损失）：尽量投影全员，
+		// 只投本人会造出一个单人订阅的群，别人发消息进不来
+		members := []string{uid}
+		if c.groupMemberProvider != nil {
+			if all, err := c.groupMemberProvider(group.ChannelID); err == nil && len(all) > 0 {
+				members = all
+			}
+		}
+		c.Warn("v3群频道不存在，按业务成员整体重建", zap.String("group_no", group.ChannelID), zap.Int("members", len(members)))
+		if err := c.projectGroupMembersV3(members, group); err != nil {
+			return fmt.Errorf("rebuild missing channel: %w", err)
+		}
+		// 投影只建成员关系，消息日志要靠第一条 append 才存在；无日志的频道会被
+		// 会话水合当「已删除」丢弃，群永远进不了列表（2026-08-25 简语 SY079 现场）。
+		// 补一条不可见的持久化种子消息（type=99，三端都不渲染）把日志立起来。
+		if err := c.seedChannelLogV3(group.ChannelID, group.ChannelType); err != nil {
+			return fmt.Errorf("seed rebuilt channel log: %w", err)
+		}
+	default:
+		return probeErr
 	}
 	if err := c.activateConversationV3(uid, group.ChannelID, group.ChannelType); err != nil {
-		return fmt.Errorf("activate projected membership: %w", err)
+		return fmt.Errorf("activate membership: %w", err)
 	}
 	return nil
 }
 
-func isMissingConversationMembershipV3(err error) bool {
-	return err != nil && strings.Contains(strings.ToLower(err.Error()), "not found")
-}
-
-func (c *Context) projectGroupMembershipV3(uid string, group Channel) error {
-	historyVisible := 0
-	if group.HistoryVisible == 1 {
-		historyVisible = 1
-	}
-	resp, err := network.Post(c.cfg.WuKongIM.APIURL+"/channel/subscriber_add", []byte(util.ToJson(map[string]interface{}{
-		"channel_id":      group.ChannelID,
-		"channel_type":    group.ChannelType,
-		"history_visible": historyVisible,
-		"subscribers":     []string{uid},
+// rawMessageSyncProbeV3 裸调 messagesync 探测频道/成员关系状态，不经过任何
+// 「频道不存在→空时间线」的伪装（IMSyncChannelMessage 会伪装，不能用于判断）。
+func (c *Context) rawMessageSyncProbeV3(loginUID, channelID string, channelType uint8) error {
+	resp, err := network.Post(c.cfg.WuKongIM.APIURL+"/channel/messagesync", []byte(util.ToJson(map[string]interface{}{
+		"login_uid":         loginUID,
+		"channel_id":        channelID,
+		"channel_type":      channelType,
+		"start_message_seq": 0,
+		"end_message_seq":   0,
+		"limit":             1,
+		"pull_mode":         PullModeDown,
 	})), nil)
 	if err != nil {
 		return err
 	}
 	return c.handlerIMError(resp)
+}
+
+// seedChannelLogV3 给重建出来的空频道补一条不可见的持久化种子消息（type=99，
+// 客户端过滤不渲染、red_dot=0 不计未读），让消息日志与会话水合成立。
+func (c *Context) seedChannelLogV3(channelID string, channelType uint8) error {
+	payload := []byte(util.ToJson(map[string]interface{}{
+		"type":  99,
+		"cmd":   "jy_channel_seed",
+		"param": map[string]interface{}{},
+	}))
+	_, err := c.SendMessageWithResult(&MsgSendReq{
+		Header:      MsgHeader{NoPersist: 0, RedDot: 0, SyncOnce: 0},
+		FromUID:     c.cfg.Account.SystemUID,
+		ChannelID:   channelID,
+		ChannelType: channelType,
+		Payload:     payload,
+	})
+	return err
+}
+
+func (c *Context) projectGroupMembersV3(uids []string, group Channel) error {
+	historyVisible := 0
+	if group.HistoryVisible == 1 {
+		historyVisible = 1
+	}
+	var firstErr error
+	for _, batch := range chunkSubscribers(uids, groupCMDSubscriberBatchSize) {
+		resp, err := network.Post(c.cfg.WuKongIM.APIURL+"/channel/subscriber_add", []byte(util.ToJson(map[string]interface{}{
+			"channel_id":      group.ChannelID,
+			"channel_type":    group.ChannelType,
+			"history_visible": historyVisible,
+			"subscribers":     batch,
+		})), nil)
+		if err == nil {
+			err = c.handlerIMError(resp)
+		}
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }
 
 const (
@@ -1041,6 +1160,51 @@ func isChannelAbsentErrV3(err error) bool {
 
 func isMembershipRequiredErrV3(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "valid channel membership required")
+}
+
+// ---------- 单聊 membership 自愈 ----------
+
+// personRepairAttemptTTL 同一 (uid, 对端) 的修复尝试间隔：修复是幂等的，但坏会话
+// 被反复打开时不必每次都打修复接口。
+const personRepairAttemptTTL = 5 * time.Minute
+
+var personRepairAttempts sync.Map // "uid|peer" -> time.Time
+
+// repairPersonMembershipV3 尝试补建单聊缺失的 membership 行（v3 引擎的
+// /conversations/membership/repair，create-if-absent，绝不动既有行）。
+//
+// 背景：目录投影丢一侧后，activate 修不了（raft 异步谎报 200）、发消息也补不了
+// （投影状态门），用户打开单聊永远是空白。
+// 返回 true 表示修复请求已被引擎接受，调用方可稍候重试一次原请求。
+func (c *Context) repairPersonMembershipV3(loginUID, channelID string) bool {
+	loginUID = strings.TrimSpace(loginUID)
+	channelID = strings.TrimSpace(channelID)
+	if loginUID == "" || channelID == "" {
+		return false
+	}
+	key := loginUID + "|" + channelID
+	if v, ok := personRepairAttempts.Load(key); ok {
+		if at, ok := v.(time.Time); ok && time.Since(at) < personRepairAttemptTTL {
+			return false
+		}
+	}
+	personRepairAttempts.Store(key, time.Now())
+	resp, err := network.Post(c.cfg.WuKongIM.APIURL+"/conversations/membership/repair", []byte(util.ToJson(map[string]interface{}{
+		"uid":          loginUID,
+		"channel_id":   channelID,
+		"channel_type": common.ChannelTypePerson.Uint8(),
+	})), nil)
+	if err != nil {
+		c.Warn("v3单聊membership修复请求失败", zap.String("uid", loginUID), zap.String("channel_id", channelID), zap.Error(err))
+		return false
+	}
+	if err = c.handlerIMError(resp); err != nil {
+		// 旧引擎没有该路由（404）时静默退化为原行为
+		c.Warn("v3单聊membership修复被拒", zap.String("uid", loginUID), zap.String("channel_id", channelID), zap.Error(err))
+		return false
+	}
+	c.Info("v3单聊membership已提交修复", zap.String("uid", loginUID), zap.String("channel_id", channelID))
+	return true
 }
 
 // emptySyncChannelMessageRespV3 构造与请求同形的空结果，让调用方走「没有更多消息」分支

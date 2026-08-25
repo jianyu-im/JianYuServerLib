@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -28,6 +29,9 @@ func TestIMSyncUserConversationV3FreshInstallReconcilesBusinessGroups(t *testing
 				return
 			}
 			_, _ = w.Write([]byte(`{"conversations":[{"channel_id":"g1","channel_type":2,"active_at":1000000,"unread":1,"last_message":{"message_id":8,"message_idstr":"8","message_seq":8,"from_uid":"u2","client_msg_no":"m8","server_timestamp_ms":1008000,"payload":"e30="}}],"done":true,"coverage":10}`))
+		case "/channel/messagesync":
+			// 对账探测：membership 在，返回一条消息
+			_, _ = w.Write([]byte(`{"messages":[{"header":{},"message_id":8,"message_idstr":"8","message_seq":8,"client_msg_no":"m8","from_uid":"u2","channel_id":"g1","channel_type":2,"timestamp":1008,"payload":"e30="}]}`))
 		case "/conversations/activate":
 			var req struct {
 				UID         string `json:"uid"`
@@ -85,16 +89,14 @@ func TestIMSyncUserConversationV3RebuildsMissingMembershipWithHistoryPolicy(t *t
 				return
 			}
 			_, _ = w.Write([]byte(`{"conversations":[{"channel_id":"g1","channel_type":2,"active_at":1000000,"last_message":{"message_id":3,"message_idstr":"3","message_seq":3,"from_uid":"u2","client_msg_no":"m3","server_timestamp_ms":1003000,"payload":"e30="}}],"done":true}`))
+		case "/channel/messagesync":
+			// 对账探测：频道在、本人缺行（activate 是异步提案恒 200，不能作判据）
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"msg":"internal/message: valid channel membership required"}`))
 		case "/conversations/activate":
 			mu.Lock()
 			activationCalls++
-			call := activationCalls
 			mu.Unlock()
-			if call == 1 {
-				w.WriteHeader(http.StatusBadRequest)
-				_, _ = w.Write([]byte(`{"msg":"meta: not found"}`))
-				return
-			}
 			_, _ = w.Write([]byte(`{}`))
 		case "/channel/subscriber_add":
 			var req struct {
@@ -128,8 +130,8 @@ func TestIMSyncUserConversationV3RebuildsMissingMembershipWithHistoryPolicy(t *t
 	if err != nil {
 		t.Fatalf("IMSyncUserConversation() error = %v", err)
 	}
-	if activationCalls != 2 || projectionCalls != 1 || listCalls != 2 {
-		t.Fatalf("activation/projection/list calls = %d/%d/%d, want 2/1/2", activationCalls, projectionCalls, listCalls)
+	if activationCalls != 1 || projectionCalls != 1 || listCalls != 2 {
+		t.Fatalf("activation/projection/list calls = %d/%d/%d, want 1/1/2", activationCalls, projectionCalls, listCalls)
 	}
 	if len(got) != 1 || got[0].ChannelID != "g1" || got[0].LastMsgSeq != 3 {
 		t.Fatalf("conversations = %+v, want rebuilt g1", got)
@@ -175,6 +177,8 @@ func TestIMSyncUserConversationV3FailsOpenWhenBusinessGroupActivationFails(t *te
 		case "/conversation/list":
 			listCalls++
 			_, _ = w.Write([]byte(`{"conversations":[{"channel_id":"g0","channel_type":2,"active_at":0,"unread":0,"last_message":{"message_id":1,"message_idstr":"1","message_seq":5,"from_uid":"u2","client_msg_no":"real-1","server_timestamp_ms":1700000000000,"payload":"eyJ0eXBlIjoxfQ=="}}],"done":true}`))
+		case "/channel/messagesync":
+			_, _ = w.Write([]byte(`{"messages":[{"header":{},"message_id":1,"message_idstr":"1","message_seq":5,"client_msg_no":"real-1","from_uid":"u2","channel_id":"g1","channel_type":2,"timestamp":1700000000,"payload":"e30="}]}`))
 		case "/conversations/activate":
 			w.WriteHeader(http.StatusServiceUnavailable)
 			_, _ = w.Write([]byte(`{"msg":"retry required"}`))
@@ -208,6 +212,8 @@ func TestIMSyncUserConversationV3FailsOpenWhenRepairedGroupIsStillAbsent(t *test
 		case "/conversation/list":
 			listCalls++
 			_, _ = w.Write([]byte(`{"conversations":[],"done":true}`))
+		case "/channel/messagesync":
+			_, _ = w.Write([]byte(`{"messages":[{"header":{},"message_id":1,"message_idstr":"1","message_seq":3,"client_msg_no":"real-1","from_uid":"u2","channel_id":"g1","channel_type":2,"timestamp":1700000000,"payload":"e30="}]}`))
 		case "/conversations/activate":
 			_, _ = w.Write([]byte(`{}`))
 		default:
@@ -408,5 +414,198 @@ func TestConversationVersionV3Scales(t *testing.T) {
 		if got := conversationVersionV3(c.activeAt, c.lastMessage); got != c.want {
 			t.Fatalf("%s: conversationVersionV3(%d,%d) = %d, want %d", c.name, c.activeAt, c.lastMessage, got, c.want)
 		}
+	}
+}
+
+// 断线漏收契约：unread>0 的会话必须随会话同步补拉最近 msgCount 条消息
+// （v2 语义；安卓不会主动补中间的洞，漏了就是「发五条只见一两条」）。
+func TestIMSyncUserConversationV3BackfillsUnreadConversations(t *testing.T) {
+	var mu sync.Mutex
+	synced := map[string]bool{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/conversation/list":
+			var sb []byte
+			sb = append(sb, []byte(`{"conversations":[`)...)
+			// 40 个会话：g0 最老且 unread=3，其余 unread=0
+			for i := 0; i < 40; i++ {
+				if i > 0 {
+					sb = append(sb, ',')
+				}
+				unread := 0
+				if i == 0 {
+					unread = 3
+				}
+				sb = append(sb, []byte(fmt.Sprintf(
+					`{"channel_id":"g%d","channel_type":2,"active_at":%d,"unread":%d,"last_message":{"message_id":%d,"message_idstr":"%d","message_seq":9,"from_uid":"u2","client_msg_no":"m%d","server_timestamp_ms":%d,"payload":"e30="}}`,
+					i, 1700000000000+int64(i)*1000, unread, i+1, i+1, i, 1700000000000+int64(i)*1000))...)
+			}
+			sb = append(sb, []byte(`],"done":true}`)...)
+			_, _ = w.Write(sb)
+		case "/channel/messagesync":
+			var req struct {
+				ChannelID string `json:"channel_id"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			mu.Lock()
+			synced[req.ChannelID] = true
+			mu.Unlock()
+			_, _ = w.Write([]byte(`{"messages":[` +
+				`{"header":{},"message_id":7,"message_idstr":"7","message_seq":7,"client_msg_no":"real-7","from_uid":"u2","channel_id":"` + req.ChannelID + `","channel_type":2,"timestamp":1700000000,"payload":"eyJ0eXBlIjoxfQ=="},` +
+				`{"header":{},"message_id":9,"message_idstr":"9","message_seq":9,"client_msg_no":"real-9","from_uid":"u2","channel_id":"` + req.ChannelID + `","channel_type":2,"timestamp":1700000002,"payload":"eyJ0eXBlIjoxfQ=="}` +
+				`]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	cfg := New()
+	cfg.WuKongIM.APIURL = server.URL
+	cfg.WuKongIM.Engine = "v3"
+	ctx := &Context{cfg: cfg, Log: log.NewTLog("test")}
+
+	got, err := ctx.IMSyncUserConversation("sync_u7", 0, 5, "", nil)
+	if err != nil {
+		t.Fatalf("IMSyncUserConversation() error = %v", err)
+	}
+	if len(got) != 40 {
+		t.Fatalf("conversations = %d, want 40", len(got))
+	}
+	if !synced["g0"] {
+		t.Fatal("unread conversation g0 must be backfilled with recent messages")
+	}
+	if synced["g39"] || synced["g1"] {
+		t.Fatal("zero-unread conversations must not be backfilled")
+	}
+	for _, conv := range got {
+		if conv.ChannelID != "g0" {
+			continue
+		}
+		if len(conv.Recents) != 2 || conv.Recents[0].MessageSeq != 7 || conv.Recents[1].MessageSeq != 9 {
+			t.Fatalf("g0 recents = %+v, want backfilled seq 7,9", conv.Recents)
+		}
+	}
+}
+
+// 频道整体缺失的重建契约：探测报 channel not found → 按业务成员投影全员 →
+// 补种子消息立日志（无日志频道会被会话水合当已删除丢弃）→ 激活。
+func TestIMSyncUserConversationV3RebuildsMissingChannelWithSeedMessage(t *testing.T) {
+	var mu sync.Mutex
+	var projectedUIDs []string
+	seedSends := 0
+	activations := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/conversation/list":
+			_, _ = w.Write([]byte(`{"conversations":[],"done":true}`))
+		case "/channel/messagesync":
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"msg":"internal/message: channel not found: channel: channel not found"}`))
+		case "/channel/subscriber_add":
+			var req struct {
+				Subscribers    []string `json:"subscribers"`
+				HistoryVisible int      `json:"history_visible"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			mu.Lock()
+			projectedUIDs = append(projectedUIDs, req.Subscribers...)
+			mu.Unlock()
+			_, _ = w.Write([]byte(`{}`))
+		case "/message/send":
+			mu.Lock()
+			seedSends++
+			mu.Unlock()
+			_, _ = w.Write([]byte(`{"message_id":1,"message_seq":1,"reason":1}`))
+		case "/conversations/activate":
+			mu.Lock()
+			activations++
+			mu.Unlock()
+			_, _ = w.Write([]byte(`{}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	cfg := New()
+	cfg.WuKongIM.APIURL = server.URL
+	cfg.WuKongIM.Engine = "v3"
+	ctx := &Context{cfg: cfg, Log: log.NewTLog("test")}
+	ctx.SetGroupMemberProvider(func(groupNo string) ([]string, error) {
+		return []string{"sync_u8", "member_b", "member_c"}, nil
+	})
+	if _, err := ctx.IMSyncUserConversation("sync_u8", 0, 1, "", []*Channel{{ChannelID: "g_missing", ChannelType: 2, HistoryVisible: 1}}); err != nil {
+		t.Fatalf("IMSyncUserConversation() error = %v", err)
+	}
+	if len(projectedUIDs) != 3 {
+		t.Fatalf("projected uids = %v, want all 3 business members", projectedUIDs)
+	}
+	if seedSends != 1 {
+		t.Fatalf("seed sends = %d, want exactly one invisible seed message", seedSends)
+	}
+	if activations != 1 {
+		t.Fatalf("activations = %d, want 1", activations)
+	}
+}
+
+// 单聊 membership 缺行自愈契约：messagesync 撞 membership required 时调
+// /conversations/membership/repair 补行，300ms 后重试一次原请求成功。
+func TestIMSyncChannelMessageV3SelfHealsPersonMembership(t *testing.T) {
+	var mu sync.Mutex
+	repaired := false
+	repairCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/channel/messagesync":
+			mu.Lock()
+			ok := repaired
+			mu.Unlock()
+			if !ok {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`{"msg":"internal/message: valid channel membership required"}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"messages":[{"header":{},"message_id":3,"message_idstr":"3","message_seq":3,"client_msg_no":"m3","from_uid":"heal_u2","channel_id":"heal_u2","channel_type":1,"timestamp":1003,"payload":"e30="}]}`))
+		case "/conversations/membership/repair":
+			var req struct {
+				UID         string `json:"uid"`
+				ChannelID   string `json:"channel_id"`
+				ChannelType uint8  `json:"channel_type"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			if req.UID != "heal_u1" || req.ChannelID != "heal_u2" || req.ChannelType != 1 {
+				t.Errorf("repair request = %+v", req)
+			}
+			mu.Lock()
+			repairCalls++
+			repaired = true
+			mu.Unlock()
+			_, _ = w.Write([]byte(`{}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	cfg := New()
+	cfg.WuKongIM.APIURL = server.URL
+	cfg.WuKongIM.Engine = "v3"
+	ctx := &Context{cfg: cfg, Log: log.NewTLog("test")}
+
+	got, err := ctx.IMSyncChannelMessage(SyncChannelMessageReq{
+		LoginUID: "heal_u1", ChannelID: "heal_u2", ChannelType: 1, Limit: 20,
+	})
+	if err != nil {
+		t.Fatalf("IMSyncChannelMessage() error = %v, want self-healed success", err)
+	}
+	if repairCalls != 1 {
+		t.Fatalf("repair calls = %d, want 1", repairCalls)
+	}
+	if got == nil || len(got.Messages) != 1 || got.Messages[0].MessageSeq != 3 {
+		t.Fatalf("messages = %+v, want the real timeline after repair", got)
 	}
 }
