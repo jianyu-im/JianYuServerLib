@@ -416,7 +416,9 @@ func (c *Context) IMClearConversationUnread(req ClearConversationUnreadReq) erro
 
 	resp, err := network.Post(c.cfg.WuKongIM.APIURL+"/conversations/setUnread", []byte(util.ToJson(req)), nil)
 	if err != nil {
-		return nil
+		// 这里原先是 `return nil`——把网络错误吞成成功。调用方据此告诉客户端"已清"，
+		// 而引擎侧 read_seq 一动没动，红点下次同步又回来，且服务端不留任何痕迹。
+		return err
 	}
 	return c.handlerIMError(resp)
 }
