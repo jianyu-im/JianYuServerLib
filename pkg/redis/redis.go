@@ -51,6 +51,22 @@ func (rc *Conn) SetAndExpire(key string, value interface{}, expire time.Duration
 	return rc.client.Set(key, value, expire).Err()
 }
 
+// MSetAndExpire 批量写入多个 key 并统一设置过期时间，走 pipeline 一次网络往返完成。
+// 用于替代「循环里逐条 SetAndExpire」——后者在一批 N 条时要 N 次 RTT，
+// 且调用方往往会画蛇添足地套一把互斥锁（*rd.Client 自带连接池，本就并发安全）。
+func (rc *Conn) MSetAndExpire(kvs map[string]interface{}, expire time.Duration) error {
+	if len(kvs) == 0 {
+		return nil
+	}
+	_, err := rc.client.Pipelined(func(pipe rd.Pipeliner) error {
+		for key, value := range kvs {
+			pipe.Set(key, value, expire)
+		}
+		return nil
+	})
+	return err
+}
+
 func (rc *Conn) GetString(key string) (string, error) {
 	val, err := rc.client.Get(key).Result()
 	if err == rd.Nil {
@@ -415,6 +431,93 @@ func (rc *Conn) LPUSH(key string, values ...interface{}) (int64, error) {
 }
 
 // 获取Redis key数组
+// popQueueScript 原子地从列表头部取出最多 n 条并同时把它们移出队列。
+// LRANGE + LTRIM 分成两条命令发会有竞态（两条之间的并发消费者会重复取到同一批），
+// 放进 Lua 由 Redis 单线程保证原子。
+var popQueueScript = rd.NewScript(`
+local n = tonumber(ARGV[1])
+local items = redis.call('LRANGE', KEYS[1], 0, n - 1)
+if #items > 0 then
+	redis.call('LTRIM', KEYS[1], #items, -1)
+end
+return items
+`)
+
+// PushQueue 批量入队（追加到列表尾部，配合 PopQueueBatch 从头部取即 FIFO）。
+// maxLen > 0 时顺带把队列裁到该长度以内（只保留最新的 maxLen 条），
+// 防止消费端故障时无限堆积撑爆内存——队列没有 per-key TTL 兜底，这个上限是必需的。
+func (rc *Conn) PushQueue(key string, maxLen int64, values ...interface{}) error {
+	if len(values) == 0 {
+		return nil
+	}
+	_, err := rc.client.Pipelined(func(pipe rd.Pipeliner) error {
+		pipe.RPush(key, values...)
+		if maxLen > 0 {
+			pipe.LTrim(key, -maxLen, -1)
+		}
+		return nil
+	})
+	return err
+}
+
+// PopQueueBatch 原子取出队列头部最多 n 条；队列为空返回空切片（不是错误）。
+func (rc *Conn) PopQueueBatch(key string, n int64) ([]string, error) {
+	if n <= 0 {
+		return nil, nil
+	}
+	result, err := popQueueScript.Run(rc.client, []string{key}, n).Result()
+	if err != nil {
+		if err == rd.Nil {
+			return nil, nil
+		}
+		return nil, err
+	}
+	raw, ok := result.([]interface{})
+	if !ok {
+		return nil, nil
+	}
+	items := make([]string, 0, len(raw))
+	for _, v := range raw {
+		if str, ok := v.(string); ok {
+			items = append(items, str)
+		}
+	}
+	return items, nil
+}
+
+// QueueLen 返回队列长度，用于观测消费是否跟得上。
+func (rc *Conn) QueueLen(key string) (int64, error) {
+	return rc.client.LLen(key).Result()
+}
+
+// ScanKeys 用 SCAN 迭代匹配 pattern 的 key。
+// 与 GetKeys 的区别：GetKeys 走 KEYS，会阻塞 Redis 单线程直到扫完全库
+// （线上实测 5 万 key 时单次 12~16ms，长期霸占 slowlog）；SCAN 分片进行不阻塞。
+// 代价是弱一致——迭代期间新增/删除的 key 可能漏掉或重复，调用方要能容忍。
+// limit > 0 时最多返回这么多条。
+func (rc *Conn) ScanKeys(pattern string, limit int) ([]string, error) {
+	keys := make([]string, 0)
+	var cursor uint64
+	for {
+		batch, next, err := rc.client.Scan(cursor, pattern, 500).Result()
+		if err != nil {
+			return nil, err
+		}
+		keys = append(keys, batch...)
+		cursor = next
+		if cursor == 0 {
+			break
+		}
+		if limit > 0 && len(keys) >= limit {
+			break
+		}
+	}
+	if limit > 0 && len(keys) > limit {
+		keys = keys[:limit]
+	}
+	return keys, nil
+}
+
 func (rc *Conn) GetKeys(key string) ([]string, error) {
 	return rc.client.Keys(key).Result()
 }

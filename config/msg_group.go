@@ -176,6 +176,13 @@ func (c *Context) SendGroupMemberAdd(req *MsgGroupMemberAddReq) error {
 		}
 	}
 
+	// 企业级「隐藏进群提示」：只静默这条可见提示，上面的 v3 会话激活照常执行，
+	// 所以新成员仍然能立刻看到这个群，只是群里不再刷"X邀请Y加入群聊"。
+	// 注意别把这个判断挪到激活之前。
+	if c.isMemberAddTipMuted(req.GroupNo) {
+		return nil
+	}
+
 	params := make([]string, 0, len(members))
 	for index := range members {
 		params = append(params, fmt.Sprintf("{%d}", index))

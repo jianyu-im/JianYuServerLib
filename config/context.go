@@ -43,6 +43,7 @@ type Context struct {
 
 	groupMemberProvider GroupMemberProvider // 群成员提供者，v3 引擎下把群 CMD 改成定向投递时用
 	callInvitePusher    CallInvitePusher    // 来电离线推送补偿，v3 引擎下 IM 不再回调 CMD 的 msg.offline
+	memberAddTipMuted   GroupTipMuter       // 企业级「隐藏进群提示」，判定某个群要不要静默"X邀请Y加入群聊"
 }
 
 // GroupMemberProvider 返回群 groupNo 当前的全部有效成员 uid。
@@ -75,6 +76,25 @@ func (c *Context) SetCallInvitePusher(pusher CallInvitePusher) {
 // GetCallInvitePusher 获取来电离线推送补偿实现，未注入时返回 nil
 func (c *Context) GetCallInvitePusher() CallInvitePusher {
 	return c.callInvitePusher
+}
+
+// GroupTipMuter 判定某个群的系统提示要不要静默（true=不发送）。
+//
+// 企业级配置存在 manager 库（company_config），lib 不直接碰那张表，
+// 由 server 层按 groupNo 反查企业号后注入。不注入时行为完全不变（照常发送）。
+type GroupTipMuter func(groupNo string) bool
+
+// SetMemberAddTipMuter 注入「X邀请Y加入群聊」提示的静默判定
+func (c *Context) SetMemberAddTipMuter(muter GroupTipMuter) {
+	c.memberAddTipMuted = muter
+}
+
+// isMemberAddTipMuted 未注入时恒为 false
+func (c *Context) isMemberAddTipMuted(groupNo string) bool {
+	if c.memberAddTipMuted == nil {
+		return false
+	}
+	return c.memberAddTipMuted(groupNo)
 }
 
 // NewContext NewContext

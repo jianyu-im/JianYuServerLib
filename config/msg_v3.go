@@ -325,18 +325,9 @@ func conversationVersionV3(activeAt, lastMessage int64) int64 {
 // 按数量级判定：秒 ~2e9、毫秒 ~2e12、微秒 ~2e15、纳秒 ~2e18，各量纲间隔千倍，边界取 1e11/1e14/1e17
 // 在 5138 年前都不会误判。
 func normalizeEpochMSV3(v int64) int64 {
-	switch {
-	case v <= 0:
-		return 0
-	case v < 1e11: // 秒
-		return v * 1000
-	case v < 1e14: // 毫秒
-		return v
-	case v < 1e17: // 微秒
-		return v / 1e3
-	default: // 纳秒
-		return v / 1e6
-	}
+	// 实现只留一份，在 msg_v3_native.go。量纲判定曾经在两处各写一遍，
+	// 改了一处漏了另一处就是一次「会话被钉在列表顶部」的事故。
+	return V3NormalizeEpochMS(v)
 }
 
 const (

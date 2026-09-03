@@ -139,6 +139,15 @@ func (c *Context) SendMessage(req *MsgSendReq) error {
 
 // SendMessage 发送消息
 func (c *Context) SendMessageWithResult(req *MsgSendReq) (*MsgSendResp, error) {
+	// 兜底补 client_msg_no：见 MsgSendReq.ClientMsgNo 的注释。这里是所有发送路径的必经点
+	// （SendMessageBatch 在 v3 下也是 sendMessageBatchV3 逐个回调 SendMessage），补在这一处
+	// 即可覆盖单发/批量/好友申请/系统通知；每次调用各自生成，批量发送时每个接收者互不相同。
+	// 复制一份再改，避免污染调用方持有的结构体。
+	if req != nil && strings.TrimSpace(req.ClientMsgNo) == "" {
+		cloned := *req
+		cloned.ClientMsgNo = util.GenerUUID()
+		req = &cloned
+	}
 	if c.imEngineV3() {
 		req = adaptSendReqV3(req, c.cfg.Account.SystemUID)
 	}
@@ -960,11 +969,20 @@ type UserBaseVo struct {
 
 // MsgSendReq 发送消息请求
 type MsgSendReq struct {
-	Header      MsgHeader `json:"header"`       // 消息头
-	Setting     uint8     `json:"setting"`      // setting
-	FromUID     string    `json:"from_uid"`     // 模拟发送者的UID
-	ChannelID   string    `json:"channel_id"`   // 频道ID
-	ChannelType uint8     `json:"channel_type"` // 频道类型
+	Header MsgHeader `json:"header"`  // 消息头
+	Setting uint8    `json:"setting"` // setting
+	// ClientMsgNo 客户端消息唯一编号。留空由 SendMessageWithResult 自动生成，勿依赖调用方传。
+	// 【为什么必须有值】v2 的 WuKongIM 在此字段为空时会自己补一个，v3 改成原样落库（
+	// wukongim internal/access/api/message_send.go: ClientMsgNo: req.ClientMsgNo），
+	// 于是 v3 迁移后所有服务端主动发的消息 client_msg_no 全是空串。而 iOS 客户端本地库
+	// 按 client_msg_no 去重（见 ios/MESSAGE_LOSS_FIX.md）：查到同 client_msg_no 的旧行就
+	// 判定重复，把新消息改名 "<cmn>-<seq>" 并置 is_deleted=1 —— 空串让所有系统消息互相撞车，
+	// 除第一条外全部在客户端被标记删除、界面上彻底消失（2026-08-26 线上实测：登录欢迎语
+	// 服务端 12 条全部落库，客户端只看得到第一条）。
+	ClientMsgNo string `json:"client_msg_no"`
+	FromUID     string `json:"from_uid"`     // 模拟发送者的UID
+	ChannelID   string `json:"channel_id"`   // 频道ID
+	ChannelType uint8  `json:"channel_type"` // 频道类型
 	StreamNo    string    `json:"stream_no"`    // 消息流号
 	Subscribers []string  `json:"subscribers"`  // 订阅者 如果此字段有值，表示消息只发给指定的订阅者
 	Payload     []byte    `json:"payload"`      // 消息内容

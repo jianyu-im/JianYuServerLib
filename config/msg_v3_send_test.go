@@ -192,6 +192,47 @@ func TestSendGroupMemberAddV3ActivatesConversationBeforeSendingTip(t *testing.T)
 	}
 }
 
+func TestSendGroupMemberAddV3MutedTipStillActivatesConversation(t *testing.T) {
+	var calls []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		switch r.URL.Path {
+		case "/conversations/activate":
+			calls = append(calls, "activate")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{}`))
+		case "/message/send":
+			calls = append(calls, "send")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"message_id":1,"message_seq":1,"reason":1}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	cfg := New()
+	cfg.WuKongIM.APIURL = server.URL
+	cfg.WuKongIM.Engine = "v3"
+	cfg.Account.SystemUID = "u_10000"
+	ctx := &Context{cfg: cfg, Log: log.NewTLog("test")}
+	ctx.SetMemberAddTipMuter(func(groupNo string) bool { return groupNo == "g_1" })
+
+	err := ctx.SendGroupMemberAdd(&MsgGroupMemberAddReq{
+		GroupNo:      "g_1",
+		Operator:     "u_owner",
+		OperatorName: "owner",
+		Members:      []*UserBaseVo{{UID: "u_new", Name: "new"}},
+	})
+	if err != nil {
+		t.Fatalf("SendGroupMemberAdd() error = %v", err)
+	}
+	// 静默的只是提示消息；会话激活必须照常发生，否则新成员看不到这个群
+	if !reflect.DeepEqual(calls, []string{"activate"}) {
+		t.Fatalf("调用 = %v, want [activate]（提示应被静默）", calls)
+	}
+}
+
 func TestSendGroupMemberAddV3ReturnsActivationFailureForOutboxRetry(t *testing.T) {
 	sentTip := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
