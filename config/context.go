@@ -44,6 +44,10 @@ type Context struct {
 	groupMemberProvider GroupMemberProvider // 群成员提供者，v3 引擎下把群 CMD 改成定向投递时用
 	callInvitePusher    CallInvitePusher    // 来电离线推送补偿，v3 引擎下 IM 不再回调 CMD 的 msg.offline
 	memberAddTipMuted   GroupTipMuter       // 企业级「隐藏进群提示」，判定某个群要不要静默"X邀请Y加入群聊"
+
+	// IM 受信系统账号缓存的重注册限流（见 EnsureSystemUIDs / refreshSystemUIDCache）
+	systemUIDRefreshMu sync.Mutex
+	systemUIDRefreshAt time.Time
 }
 
 // GroupMemberProvider 返回群 groupNo 当前的全部有效成员 uid。

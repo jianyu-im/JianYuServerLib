@@ -55,6 +55,11 @@ func (c *Context) sendMessageBatchV3(req *MsgSendBatch) error {
 // （对应上游 pkg/protocol/frame.ReasonSuccess，reason 枚举从 0=Unknown 开始）。
 const msgReasonSuccessV3 = 1
 
+// msgReasonSubscriberNotExistV3 v3 /message/send 返回体里的「发送者不在频道成员里」
+// （上游 frame.ReasonSubscriberNotExist）。系统账号拿到这个码等于受信名单失效，
+// 见 EnsureSystemUIDs 的注释。
+const msgReasonSubscriberNotExistV3 = 3
+
 // msgReasonTextV3 把 v3 的 reason 码翻成可读名字，只覆盖会打到日志里的那几个，
 // 其余原样返回数字（完整枚举见上游 pkg/protocol/frame/common.go 的 ReasonCode）。
 func msgReasonTextV3(reason int64) string {

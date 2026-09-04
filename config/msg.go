@@ -139,6 +139,12 @@ func (c *Context) SendMessage(req *MsgSendReq) error {
 
 // SendMessage 发送消息
 func (c *Context) SendMessageWithResult(req *MsgSendReq) (*MsgSendResp, error) {
+	return c.sendMessageWithResult(req, true)
+}
+
+// sendMessageWithResult 是 SendMessageWithResult 的实现体。
+// allowSystemUIDRetry=false 表示这已经是「受信名单失效」自愈后的重发，不再递归重试。
+func (c *Context) sendMessageWithResult(req *MsgSendReq, allowSystemUIDRetry bool) (*MsgSendResp, error) {
 	// 兜底补 client_msg_no：见 MsgSendReq.ClientMsgNo 的注释。这里是所有发送路径的必经点
 	// （SendMessageBatch 在 v3 下也是 sendMessageBatchV3 逐个回调 SendMessage），补在这一处
 	// 即可覆盖单发/批量/好友申请/系统通知；每次调用各自生成，批量发送时每个接收者互不相同。
@@ -182,6 +188,15 @@ func (c *Context) SendMessageWithResult(req *MsgSendReq) (*MsgSendResp, error) {
 		// 新成员在群里没有任何可见消息，客户端整个群都不出现。
 		if c.imEngineV3() {
 			if reason := dataResult.Get("reason"); reason.Exists() && reason.Int() != int64(msgReasonSuccessV3) {
+				// 系统账号被判「不在频道成员里」只有一种可能：IM 重启后内存受信名单空了
+				// （持久层里还在，但 v3 普通启动路径不加载它）。就地重注册再发一次，
+				// 别让这个窗口里的进群提示、建群提示整批永久丢失。
+				if allowSystemUIDRetry &&
+					reason.Int() == int64(msgReasonSubscriberNotExistV3) &&
+					c.isSystemSender(req.FromUID) &&
+					c.refreshSystemUIDCache() {
+					return c.sendMessageWithResult(req, false)
+				}
 				return nil, fmt.Errorf("IM服务[SendMessage]拒收消息！reason=%d(%s) channel=%s type=%d from=%s",
 					reason.Int(), msgReasonTextV3(reason.Int()), req.ChannelID, req.ChannelType, req.FromUID)
 			}
@@ -267,15 +282,26 @@ func (c *Context) IMAddSystemUids(uids []string) error {
 	return c.handlerIMError(resp)
 }
 
-// EnsureSystemUIDs 幂等注册业务系统账号为 IM 受信发送者（后台重试直到成功）。
+// IMAddSystemUidsToCache 只把系统账号写进 IM 进程内的受信缓存，不碰持久层。
 //
-// WuKongIM v3 强制「发送者必须是频道订阅者」，只有注册进 systemuids 名单的账号
-// 能绕过该校验（v3 internal/usecase/message 的 SystemUIDChecker）。业务的群系统
-// 提示（建群/拉人/踢人/群更新）都以 Account.SystemUID 发送，名单里没有它时会被
-// reason=3(SubscriberNotExist) 整类拒收——2026-08-24 现场：v3 名单只有 fileHelper，
-// 6 小时内 40 条拉人事件、10/11 条建群事件全部失败，用户表现为「拉人进群没反应」。
-// v2 提供同一 API 且注册幂等，无需按引擎区分。IM 未就绪时靠重试兜底，不阻塞启动。
-func (c *Context) EnsureSystemUIDs() {
+// 对应 wukongim 的 /user/systemuids_add_to_cache，是纯内存写、不产生 raft 提案，
+// 所以可以高频调用。EnsureSystemUIDs 的保活循环用它，避免每分钟往集群里写一次订阅者。
+func (c *Context) IMAddSystemUidsToCache(uids []string) error {
+	resp, err := network.Post(c.cfg.WuKongIM.APIURL+"/user/systemuids_add_to_cache", []byte(util.ToJson(map[string]interface{}{
+		"uids": uids,
+	})), nil)
+	if err != nil {
+		return err
+	}
+	return c.handlerIMError(resp)
+}
+
+// systemUIDKeepAliveInterval 受信名单保活间隔。IM 重启后内存名单立刻是空的，
+// 这个间隔就是「群系统提示会被拒收」的最坏窗口（拒收时还有 refreshSystemUIDCache 兜底）。
+const systemUIDKeepAliveInterval = 30 * time.Second
+
+// systemUIDs 返回配置里的业务系统账号（u_10000 / fileHelper）。
+func (c *Context) systemUIDs() []string {
 	uids := make([]string, 0, 2)
 	if uid := strings.TrimSpace(c.cfg.Account.SystemUID); uid != "" {
 		uids = append(uids, uid)
@@ -283,22 +309,88 @@ func (c *Context) EnsureSystemUIDs() {
 	if uid := strings.TrimSpace(c.cfg.Account.FileHelperUID); uid != "" {
 		uids = append(uids, uid)
 	}
+	return uids
+}
+
+// isSystemSender 判断一个发送者是不是业务系统账号。
+func (c *Context) isSystemSender(uid string) bool {
+	uid = strings.TrimSpace(uid)
+	if uid == "" {
+		return false
+	}
+	for _, sys := range c.systemUIDs() {
+		if sys == uid {
+			return true
+		}
+	}
+	return false
+}
+
+// EnsureSystemUIDs 幂等注册业务系统账号为 IM 受信发送者，并常驻保活。
+//
+// WuKongIM v3 强制「发送者必须是频道订阅者」，只有注册进 systemuids 名单的账号
+// 能绕过该校验（v3 internal/usecase/message 的 SystemUIDChecker）。业务的群系统
+// 提示（建群/拉人/踢人/群更新）都以 Account.SystemUID 发送，名单里没有它时会被
+// reason=3(SubscriberNotExist) 整类拒收——2026-08-24 现场：v3 名单只有 fileHelper，
+// 6 小时内 40 条拉人事件、10/11 条建群事件全部失败，用户表现为「拉人进群没反应」。
+//
+// **必须常驻保活，注册一次是不够的**：v3 的受信判定读的是进程内缓存
+// （internal/usecase/user 的 systemUIDCache），而该缓存只在备份恢复流程里
+// 才会从持久层重建，普通启动路径根本不加载。于是 IM 每重启一次名单就空一次，
+// 持久层里查得到（GET /user/systemuids 照常返回 u_10000）却完全不生效——
+// 2026-09-04 现场：IM 于 09-03 21:07 重启，此后三天 group.memberadd 247 条、
+// group.update 230 条全部 reason=3 失败，用户表现为「拉人进群没有提示」。
+// 引擎侧是只读的（见 no-wukongim-code-changes），所以自愈只能放在这里。
+//
+// v2 提供同一组 API 且注册幂等，无需按引擎区分。IM 未就绪时靠重试兜底，不阻塞启动。
+func (c *Context) EnsureSystemUIDs() {
+	uids := c.systemUIDs()
 	if len(uids) == 0 {
 		return
 	}
 	go func() {
-		const maxAttempts = 30
-		for attempt := 1; attempt <= maxAttempts; attempt++ {
+		// 首轮：写持久层（重启 IM 后靠保活恢复内存名单，持久层只需要写成功一次）
+		for attempt := 1; ; attempt++ {
 			err := c.IMAddSystemUids(uids)
 			if err == nil {
 				c.Info("系统账号已注册为IM受信发送者", zap.Strings("uids", uids))
-				return
+				break
 			}
 			c.Warn("注册IM系统账号失败，稍后重试", zap.Error(err), zap.Int("attempt", attempt), zap.Strings("uids", uids))
 			time.Sleep(10 * time.Second)
 		}
-		c.Error("注册IM系统账号多次失败，群系统提示消息可能被IM拒收", zap.Strings("uids", uids))
+		// 保活：IM 重启会清空内存受信名单，这里周期性把它写回去（纯内存写，无 raft 开销）
+		for {
+			time.Sleep(systemUIDKeepAliveInterval)
+			if err := c.IMAddSystemUidsToCache(uids); err != nil {
+				c.Warn("刷新IM受信系统账号缓存失败", zap.Error(err), zap.Strings("uids", uids))
+			}
+		}
 	}()
+}
+
+// refreshSystemUIDCache 立刻把系统账号写回 IM 的内存受信名单，带 5 秒限流。
+//
+// 用于 IM 刚重启、保活循环还没轮到的那个窗口：系统提示被 reason=3 拒收时先自愈再重发一次，
+// 免得这段时间里的进群提示、建群提示整批永久丢失（事件层把拒收判为永久失败、不重试）。
+func (c *Context) refreshSystemUIDCache() bool {
+	uids := c.systemUIDs()
+	if len(uids) == 0 {
+		return false
+	}
+	c.systemUIDRefreshMu.Lock()
+	if time.Since(c.systemUIDRefreshAt) < 5*time.Second {
+		c.systemUIDRefreshMu.Unlock()
+		return false
+	}
+	c.systemUIDRefreshAt = time.Now()
+	c.systemUIDRefreshMu.Unlock()
+	if err := c.IMAddSystemUidsToCache(uids); err != nil {
+		c.Warn("拒收后重注册IM受信系统账号失败", zap.Error(err), zap.Strings("uids", uids))
+		return false
+	}
+	c.Warn("IM受信系统账号缓存已失效（IM重启？），已重注册并重发", zap.Strings("uids", uids))
+	return true
 }
 
 // IMRemoveSystemUids 移除系统成员
