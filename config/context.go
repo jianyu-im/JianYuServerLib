@@ -41,9 +41,10 @@ type Context struct {
 	valueMap  sync.Map
 	SetupTask bool // 是否安装task
 
-	groupMemberProvider GroupMemberProvider // 群成员提供者，v3 引擎下把群 CMD 改成定向投递时用
-	callInvitePusher    CallInvitePusher    // 来电离线推送补偿，v3 引擎下 IM 不再回调 CMD 的 msg.offline
-	memberAddTipMuted   GroupTipMuter       // 企业级「隐藏进群提示」，判定某个群要不要静默"X邀请Y加入群聊"
+	groupMemberProvider  GroupMemberProvider  // 群成员提供者，v3 引擎下把群 CMD 改成定向投递时用
+	callInvitePusher     CallInvitePusher     // 来电离线推送补偿，v3 引擎下 IM 不再回调 CMD 的 msg.offline
+	memberAddTipMuted    GroupTipMuter        // 企业级「隐藏进群提示」，判定某个群要不要静默"X邀请Y加入群聊"
+	groupJoinFloorWriter GroupJoinFloorWriter // 入群隐藏历史水位写入，必须在入群提示落地之前执行
 
 	// IM 受信系统账号缓存的重注册限流（见 EnsureSystemUIDs / refreshSystemUIDCache）
 	systemUIDRefreshMu sync.Mutex
@@ -99,6 +100,29 @@ func (c *Context) isMemberAddTipMuted(groupNo string) bool {
 		return false
 	}
 	return c.memberAddTipMuted(groupNo)
+}
+
+// GroupJoinFloorWriter 给一批新成员写「入群隐藏历史」水位（channel_offset）。
+//
+// 水位取的是频道当前 max seq，所以它**必须在入群提示落地之前**写：提示一旦先落，
+// 水位就等于提示本身的 seq，而可见规则是「seq 必须严格大于水位」，被邀请的人
+// 进群后连「X邀请你加入群聊」都看不到（2026-09-10 aa1688 现场：31 个隐藏历史群
+// 74 个有水位行的新成员 100% 命中）。以前 message 模块把它挂成 group.memberadd 的
+// listener，而 listener 是在主处理器发完提示之后才作为副作用并发跑的，顺序天然是反的。
+// 水位表在业务库，lib 不碰，由 server 层注入。不注入时行为不变。
+type GroupJoinFloorWriter func(groupNo string, members []*UserBaseVo) error
+
+// SetGroupJoinFloorWriter 注入入群隐藏历史水位写入实现
+func (c *Context) SetGroupJoinFloorWriter(writer GroupJoinFloorWriter) {
+	c.groupJoinFloorWriter = writer
+}
+
+// writeGroupJoinFloor 未注入时为空操作
+func (c *Context) writeGroupJoinFloor(groupNo string, members []*UserBaseVo) error {
+	if c.groupJoinFloorWriter == nil {
+		return nil
+	}
+	return c.groupJoinFloorWriter(groupNo, members)
 }
 
 // NewContext NewContext

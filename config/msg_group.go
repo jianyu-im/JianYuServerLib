@@ -170,6 +170,14 @@ func (c *Context) SendGroupMemberAdd(req *MsgGroupMemberAddReq) error {
 	// 保证新成员立即拥有会话；过去完全依赖下面这条 tip 消息顺带创建会话，一旦消息
 	// 因 from_uid/白名单/短时不可用发送失败，业务库虽已有成员，客户端却永远看不到群。
 	// 先幂等激活每个新成员的群会话，再发送可见提示，二者任一步失败都交给事件 outbox 重试。
+	//
+	// 但在这两步之前，先把「入群隐藏历史」水位写好：水位 = 频道当前 max seq，如果等到
+	// 提示落地之后再写，水位就正好是提示自己的 seq，新成员进群后看不到「X邀请你加入群聊」
+	// （可见规则是严格大于水位）。见 GroupJoinFloorWriter 的注释。写失败同样交给 outbox 重试，
+	// 重试时水位会被重写成当时的 max，但提示还没发出去，先后关系仍然成立。
+	if err := c.writeGroupJoinFloor(req.GroupNo, members); err != nil {
+		return fmt.Errorf("写入新成员入群水位失败: %w", err)
+	}
 	if c.imEngineV3() {
 		if err := c.activateGroupMemberConversationsV3(req.GroupNo, members); err != nil {
 			return fmt.Errorf("激活新成员群会话失败: %w", err)

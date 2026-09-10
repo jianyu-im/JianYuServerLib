@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -469,5 +470,79 @@ func TestSendGroupCreateV3ReturnsActivationFailureForOutboxRetry(t *testing.T) {
 	}
 	if sentTip {
 		t.Fatal("activate 失败后不应继续发送建群提示")
+	}
+}
+
+// 入群隐藏历史水位必须在提示落地之前写：写在后面就等于提示自己的 seq，被邀请人看不到提示。
+func TestSendGroupMemberAddV3WritesJoinFloorBeforeActivateAndTip(t *testing.T) {
+	var calls []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		switch r.URL.Path {
+		case "/conversations/activate":
+			calls = append(calls, "activate")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{}`))
+		case "/message/send":
+			calls = append(calls, "send")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"message_id":1,"message_seq":1,"reason":1}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	cfg := New()
+	cfg.WuKongIM.APIURL = server.URL
+	cfg.WuKongIM.Engine = "v3"
+	cfg.Account.SystemUID = "u_10000"
+	ctx := &Context{cfg: cfg, Log: log.NewTLog("test")}
+	ctx.SetGroupJoinFloorWriter(func(groupNo string, members []*UserBaseVo) error {
+		if groupNo != "g_1" || len(members) != 1 || members[0].UID != "u_new" {
+			t.Fatalf("水位写入参数 = %s %+v", groupNo, members)
+		}
+		calls = append(calls, "floor")
+		return nil
+	})
+
+	err := ctx.SendGroupMemberAdd(&MsgGroupMemberAddReq{
+		GroupNo:      "g_1",
+		Operator:     "u_owner",
+		OperatorName: "owner",
+		Members:      []*UserBaseVo{{UID: "u_new", Name: "new"}},
+	})
+	if err != nil {
+		t.Fatalf("SendGroupMemberAdd() error = %v", err)
+	}
+	if !reflect.DeepEqual(calls, []string{"floor", "activate", "send"}) {
+		t.Fatalf("调用顺序 = %v, want [floor activate send]", calls)
+	}
+}
+
+// 水位写失败要交给 outbox 重试，而且提示不能先发出去（否则重试时水位又会盖过提示）。
+func TestSendGroupMemberAddV3JoinFloorFailureBlocksTip(t *testing.T) {
+	sent := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		sent = true
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"message_id":1,"message_seq":1,"reason":1}`))
+	}))
+	t.Cleanup(server.Close)
+
+	cfg := New()
+	cfg.WuKongIM.APIURL = server.URL
+	cfg.WuKongIM.Engine = "v3"
+	cfg.Account.SystemUID = "u_10000"
+	ctx := &Context{cfg: cfg, Log: log.NewTLog("test")}
+	ctx.SetGroupJoinFloorWriter(func(string, []*UserBaseVo) error { return fmt.Errorf("db down") })
+
+	err := ctx.SendGroupMemberAdd(&MsgGroupMemberAddReq{GroupNo: "g_1", Members: []*UserBaseVo{{UID: "u_new"}}})
+	if err == nil {
+		t.Fatal("水位写失败应返回 error 交给 outbox 重试")
+	}
+	if sent {
+		t.Fatal("水位写失败时不应激活会话或发送提示")
 	}
 }
