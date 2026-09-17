@@ -36,6 +36,12 @@ func New(addr string, password string) *Conn {
 	return c
 }
 
+// Client 暴露底层 go-redis 客户端，给需要 Pipeline / Eval 这类封装没提供的能力用。
+// 调用方自己保证不要绕过封装做破坏性操作（FLUSH 之类）。
+func (rc *Conn) Client() *rd.Client {
+	return rc.client
+}
+
 func (rc *Conn) Ping() (string, error) {
 	return rc.client.Ping().Result()
 }
