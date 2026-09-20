@@ -90,7 +90,15 @@ func TestIMSyncUserConversationV3RebuildsMissingMembershipWithHistoryPolicy(t *t
 			}
 			_, _ = w.Write([]byte(`{"conversations":[{"channel_id":"g1","channel_type":2,"active_at":1000000,"last_message":{"message_id":3,"message_idstr":"3","message_seq":3,"from_uid":"u2","client_msg_no":"m3","server_timestamp_ms":1003000,"payload":"e30="}}],"done":true}`))
 		case "/channel/messagesync":
-			// 对账探测：频道在、本人缺行（activate 是异步提案恒 200，不能作判据）
+			// 对账探测：频道在、本人缺行（activate 是异步提案恒 200，不能作判据）。
+			// 投影之后成员关系生效，探测转为成功——自愈逻辑投影后会再探测一次确认。
+			mu.Lock()
+			projected := projectionCalls > 0
+			mu.Unlock()
+			if projected {
+				_, _ = w.Write([]byte(`{"messages":[]}`))
+				return
+			}
 			w.WriteHeader(http.StatusBadRequest)
 			_, _ = w.Write([]byte(`{"msg":"internal/message: valid channel membership required"}`))
 		case "/conversations/activate":

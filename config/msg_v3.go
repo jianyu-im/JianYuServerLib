@@ -811,8 +811,8 @@ func (c *Context) repairGroupConversationV3(uid string, group Channel) error {
 	case probeErr == nil:
 		// membership 在，只是目录读没带出来（或 activated_at 缺）：提优先级即可
 	case isMembershipRequiredErrV3(probeErr):
-		// 频道在、本人缺行：投影本人
-		if err := c.projectGroupMembersV3([]string{uid}, group); err != nil {
+		// 频道在、本人缺行（或行是墓碑）：投影本人；投影被版本栅栏挡住时顶版本自愈
+		if err := c.healGroupMembershipV3(uid, group); err != nil {
 			return fmt.Errorf("project missing membership: %w", err)
 		}
 	case strings.Contains(probeErr.Error(), "channel not found"):
@@ -1252,7 +1252,7 @@ const groupConversationRepairMaxPerSync = 32
 //
 // v3 的 /conversation/list 读取的是 UID-owned membership。群 subscriber 与这张目录不是
 // 同一个权威集合，不能再让「是否出现群」依赖一条系统提示消息的副作用。
-func (c *Context) activateGroupMemberConversationsV3(groupNo string, members []*UserBaseVo) error {
+func (c *Context) activateGroupMemberConversationsV3(groupNo string, members []*UserBaseVo, historyVisible int) error {
 	groupNo = strings.TrimSpace(groupNo)
 	if groupNo == "" {
 		return fmt.Errorf("group_no不能为空")
@@ -1288,6 +1288,15 @@ func (c *Context) activateGroupMemberConversationsV3(groupNo string, members []*
 			defer wg.Done()
 			for uid := range jobs {
 				err := c.activateConversationV3(uid, groupNo, common.ChannelTypeGroup.Uint8())
+				if isMembershipRowMissingErrV3(err) {
+					// 加订阅返回了 200，成员关系却没生成（重新入群被版本栅栏挡住），见 healGroupMembershipV3
+					group := Channel{ChannelID: groupNo, ChannelType: common.ChannelTypeGroup.Uint8(), HistoryVisible: historyVisible}
+					if healErr := c.healGroupMembershipV3(uid, group); healErr != nil {
+						err = fmt.Errorf("%w（成员关系自愈失败: %v）", err, healErr)
+					} else {
+						err = c.activateConversationV3(uid, groupNo, common.ChannelTypeGroup.Uint8())
+					}
+				}
 				if err != nil {
 					firstErrOnce.Do(func() {
 						firstErr = fmt.Errorf("uid=%s: %w", uid, err)
@@ -1302,6 +1311,92 @@ func (c *Context) activateGroupMemberConversationsV3(groupNo string, members []*
 	close(jobs)
 	wg.Wait()
 	return firstErr
+}
+
+// ---------- 群成员关系版本栅栏自愈 ----------
+//
+// 现象（2026-09-18/19 线上两例）：退过群/被移出过的用户再次被拉进群，/channel/subscriber_add 返回 200，
+// 但引擎里他的 UID-owned membership 仍是墓碑：messagesync 报 valid channel membership required、
+// /conversations/activate 报 db: not found，整群一条消息都看不到也收不到，memberadd 事件无限重试。
+//
+// 机理（读引擎源码 + 实测确认）：membership 行带 SourceVersion 栅栏，取值是频道的 SubscriberMutationVersion+1，
+// 新写入的版本号小于已有行的版本号就被静默丢弃（resolveUserChannelMembership）。而频道行的更新是
+// 「读出-改-写回」（UpdateInfo / refreshLargeGroupFlag），与并发的成员变更竞争时会把计数器写回旧值；
+// 两例都发生在成员数越过 500（large 标记翻转）的活跃大群里。计数器回退后，重新入群拿到的版本号低于
+// 退群时墓碑的版本号，于是永远加不回来，直到群里别的成员变更把计数器慢慢顶过去。
+// 引擎代码不改（见红线），这里在业务侧自愈：用该成员自己的「移出+加入」做真实变更，每次让计数器 +1，
+// 顶过墓碑版本后投影即生效。实测第二例顶了约 220 个版本、耗时 8 秒恢复。
+const (
+	groupFenceBumpMaxCycles  = 400              // 单次最多 400 轮移出+加入（约 800 个版本、十几秒）
+	groupFenceBumpProbeEvery = 20               // 每 20 轮探测一次是否已恢复
+	groupFenceBumpAttemptTTL = 10 * time.Minute // 同一 (群,成员) 两次顶版本之间的最小间隔
+)
+
+var groupFenceBumpAttempts sync.Map // "groupNo|uid" -> time.Time
+
+// isMembershipRowMissingErrV3 引擎说这个用户在该频道没有有效的成员关系行（缺行或墓碑）。
+func isMembershipRowMissingErrV3(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "channel not found") {
+		return false
+	}
+	return strings.Contains(msg, "db: not found") || isMembershipRequiredErrV3(err)
+}
+
+// healGroupMembershipV3 让 uid 在群里的成员关系真正生效。先按正常方式投影一次；仍被挡住就顶版本。
+func (c *Context) healGroupMembershipV3(uid string, group Channel) error {
+	if err := c.projectGroupMembersV3([]string{uid}, group); err != nil {
+		return err
+	}
+	probeErr := c.rawMessageSyncProbeV3(uid, group.ChannelID, group.ChannelType)
+	if probeErr == nil {
+		return nil
+	}
+	if !isMembershipRequiredErrV3(probeErr) {
+		return probeErr
+	}
+	key := group.ChannelID + "|" + uid
+	if last, ok := groupFenceBumpAttempts.Load(key); ok {
+		if at, ok := last.(time.Time); ok && time.Since(at) < groupFenceBumpAttemptTTL {
+			return fmt.Errorf("成员关系被版本栅栏挡住，%s 内已尝试过顶版本，等待下次", groupFenceBumpAttemptTTL)
+		}
+	}
+	groupFenceBumpAttempts.Store(key, time.Now())
+	c.Warn("v3群成员关系被版本栅栏挡住，开始顶版本自愈",
+		zap.String("group_no", group.ChannelID), zap.String("uid", uid))
+	started := time.Now()
+	removeReq := &SubscriberRemoveReq{ChannelID: group.ChannelID, ChannelType: group.ChannelType, Subscribers: []string{uid}}
+	for cycle := 1; cycle <= groupFenceBumpMaxCycles; cycle++ {
+		// 顺序必须是先移出再加入：任何时候中断，最后一步都是「加入」，不会把一个正常成员留在被移出的状态
+		if err := c.IMRemoveSubscriber(removeReq); err != nil {
+			_ = c.projectGroupMembersV3([]string{uid}, group)
+			return fmt.Errorf("顶版本时移出失败: %w", err)
+		}
+		if err := c.projectGroupMembersV3([]string{uid}, group); err != nil {
+			return fmt.Errorf("顶版本时加入失败: %w", err)
+		}
+		if cycle%groupFenceBumpProbeEvery != 0 && cycle != groupFenceBumpMaxCycles {
+			continue
+		}
+		probeErr = c.rawMessageSyncProbeV3(uid, group.ChannelID, group.ChannelType)
+		if probeErr == nil {
+			groupFenceBumpAttempts.Delete(key)
+			c.Info("v3群成员关系顶版本自愈成功",
+				zap.String("group_no", group.ChannelID), zap.String("uid", uid),
+				zap.Int("cycles", cycle), zap.Duration("cost", time.Since(started)))
+			return nil
+		}
+		if !isMembershipRequiredErrV3(probeErr) {
+			return probeErr
+		}
+	}
+	c.Error("v3群成员关系顶版本后仍未恢复，等待下次重试",
+		zap.String("group_no", group.ChannelID), zap.String("uid", uid),
+		zap.Int("cycles", groupFenceBumpMaxCycles), zap.Duration("cost", time.Since(started)))
+	return fmt.Errorf("成员关系被版本栅栏挡住，顶了 %d 轮仍未恢复", groupFenceBumpMaxCycles)
 }
 
 func (c *Context) activateConversationV3(uid, channelID string, channelType uint8) error {

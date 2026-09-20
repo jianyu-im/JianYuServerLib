@@ -20,7 +20,7 @@ func (c *Context) SendGroupCreate(req *MsgGroupCreateReq) error {
 	// 6 小时内 group.create 事件 10 失败 1 成功）。与 SendGroupMemberAdd 对齐：
 	// 先幂等激活全体成员（含群主）的群会话，再发可见提示，失败交给事件 outbox 重试。
 	if c.imEngineV3() {
-		if err := c.activateGroupMemberConversationsV3(req.GroupNo, members); err != nil {
+		if err := c.activateGroupMemberConversationsV3(req.GroupNo, members, 0); err != nil {
 			return fmt.Errorf("激活建群成员会话失败: %w", err)
 		}
 	}
@@ -179,7 +179,7 @@ func (c *Context) SendGroupMemberAdd(req *MsgGroupMemberAddReq) error {
 		return fmt.Errorf("写入新成员入群水位失败: %w", err)
 	}
 	if c.imEngineV3() {
-		if err := c.activateGroupMemberConversationsV3(req.GroupNo, members); err != nil {
+		if err := c.activateGroupMemberConversationsV3(req.GroupNo, members, req.HistoryVisible); err != nil {
 			return fmt.Errorf("激活新成员群会话失败: %w", err)
 		}
 	}

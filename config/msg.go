@@ -1126,6 +1126,9 @@ type MsgGroupMemberAddReq struct {
 	OperatorName string        `json:"operator_name"` // 操作者名称
 	GroupNo      string        `json:"group_no"`      // 群编号
 	Members      []*UserBaseVo `json:"members"`       // 邀请成员
+	// HistoryVisible 该群是否允许新成员查看入群前的历史。成员关系自愈需要重新投影订阅者时用；
+	// 老事件没有这个字段按 0（不可见）处理，宁可少看历史也不泄露。
+	HistoryVisible int `json:"history_visible,omitempty"`
 }
 
 // CMDGroupAvatarUpdateReq 群头像更新请求
