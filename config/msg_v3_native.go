@@ -366,9 +366,10 @@ func (c *Context) V3SetConversationUnread(uid, channelID string, channelType uin
 // V3DeleteConversation 删除会话（引擎写墓碑，会话从目录消失）。
 // 注意这不是清屏：清屏要保留会话本身，引擎没有对应路由，见 V3ClearChannelHistoryFloor 的说明。
 func (c *Context) V3DeleteConversation(uid, channelID string, channelType uint8) error {
-	return c.v3PostConversationMutation("/conversations/delete", map[string]interface{}{
+	// 幂等：会话本来就不存在（成员关系缺行/墓碑）按成功处理，见 ignoreConversationAlreadyGoneV3
+	return ignoreConversationAlreadyGoneV3(c.v3PostConversationMutation("/conversations/delete", map[string]interface{}{
 		"uid": uid, "channel_id": channelID, "channel_type": channelType,
-	})
+	}))
 }
 
 // V3ActivateConversation 把会话提到目录顶部（引擎写 activated_at=now，纳秒）。

@@ -558,7 +558,18 @@ func (c *Context) IMDeleteConversation(req DeleteConversationReq) error {
 	if err != nil {
 		return nil
 	}
-	return c.handlerIMError(resp)
+	return ignoreConversationAlreadyGoneV3(c.handlerIMError(resp))
+}
+
+// ignoreConversationAlreadyGoneV3 删会话是幂等操作：引擎说「db: not found」= 这个用户在该频道已经没有
+// 有效的成员关系行（缺行或墓碑），会话对他本来就不存在，删除的目标已经达成，不是失败。
+// 最常见的来源是退群：业务先调 subscriber_remove（引擎随即把成员关系写成墓碑），随后 conversation.delete
+// 事件再来删会话，必然撞 not found——2026-09 线上该事件 98% 以上都是这样「失败」的（三周 900 多条）。
+func ignoreConversationAlreadyGoneV3(err error) error {
+	if err != nil && strings.Contains(err.Error(), "db: not found") {
+		return nil
+	}
+	return err
 }
 
 // IMSyncUserConversation 同步用户会话数据
