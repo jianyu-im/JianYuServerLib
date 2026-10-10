@@ -34,6 +34,16 @@ const (
 	RoleReadonlyAdmin = "readonly_admin"
 )
 
+// managerRoles 后台管理员角色（新角色系统），只有后台登录/进入企业会签发这些角色的 token
+var managerRoles = map[string]bool{
+	RoleSuperAdmin:    true,
+	RoleGAAdmin:       true,
+	RoleGameAdmin:     true,
+	RoleCompanyAdmin:  true,
+	RoleNormalAdmin:   true,
+	RoleReadonlyAdmin: true,
+}
+
 // WKHttp WKHttp
 type WKHttp struct {
 	r    *gin.Engine
@@ -161,15 +171,7 @@ func (c *Context) CheckLoginRole() error {
 		return errors.New("登录用户角色错误")
 	}
 	// 只支持新角色系统
-	validRoles := map[string]bool{
-		RoleSuperAdmin:    true,
-		RoleGAAdmin:       true,
-		RoleGameAdmin:     true,
-		RoleCompanyAdmin:  true,
-		RoleNormalAdmin:   true,
-		RoleReadonlyAdmin: true,
-	}
-	if !validRoles[role] {
+	if !managerRoles[role] {
 		return errors.New("该用户无权执行此操作")
 	}
 	return nil
@@ -310,6 +312,12 @@ func (l *WKHttp) AuthMiddleware(cache cache.Cache, tokenPrefix string) HandlerFu
 			return
 		}
 		companyCode := c.GetHeader("companyCode")
+		// 后台管理员 token 的值里自带企业号（登录/进入企业时写入），以它为准、忽略请求头。
+		// 否则任一企业管理员改个 companyCode 请求头就能读写别家企业的后台数据（2026-10-10 LY101 事件排查发现）。
+		// App 端 token 不受影响，仍按请求头/uid 前缀取企业号。
+		if managerRoles[uidAndNames[2]] && strings.TrimSpace(uidAndNames[3]) != "" {
+			companyCode = strings.TrimSpace(uidAndNames[3])
+		}
 		if companyCode == "" {
 			companyCode = UidCompanyCode(uidAndNames[0])
 		}
