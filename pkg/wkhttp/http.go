@@ -10,6 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/jianyu-im/JianYuServerLib/pkg/cache"
 	"github.com/jianyu-im/JianYuServerLib/pkg/log"
+	"github.com/jianyu-im/JianYuServerLib/pkg/util"
 	"github.com/opentracing/opentracing-go"
 	"go.uber.org/zap"
 )
@@ -34,6 +35,19 @@ const (
 	RoleReadonlyAdmin = "readonly_admin"
 )
 
+// authShadowLog 鉴权影子模式日志（只统计不拦截的口径差异）
+var authShadowLog = log.NewTLog("AuthShadow")
+
+// managerRoles 后台管理员角色（新角色系统），只有后台登录/进入企业会签发这些角色的 token
+var managerRoles = map[string]bool{
+	RoleSuperAdmin:    true,
+	RoleGAAdmin:       true,
+	RoleGameAdmin:     true,
+	RoleCompanyAdmin:  true,
+	RoleNormalAdmin:   true,
+	RoleReadonlyAdmin: true,
+}
+
 // WKHttp WKHttp
 type WKHttp struct {
 	r    *gin.Engine
@@ -45,6 +59,11 @@ func New() *WKHttp {
 	l := &WKHttp{
 		r:    gin.New(),
 		pool: sync.Pool{},
+	}
+	// 只采信自家 HTTP 代理传来的 X-Forwarded-For（gin 默认信任所有来源，客户端可伪造 IP）
+	if err := l.r.SetTrustedProxies(util.TrustedProxies()); err != nil {
+		log.Warn("设置可信代理失败，回退为不信任任何代理", zap.Error(err))
+		_ = l.r.SetTrustedProxies(nil)
 	}
 	l.r.Use(gin.Recovery())
 	l.pool.New = func() interface{} {
@@ -161,15 +180,7 @@ func (c *Context) CheckLoginRole() error {
 		return errors.New("登录用户角色错误")
 	}
 	// 只支持新角色系统
-	validRoles := map[string]bool{
-		RoleSuperAdmin:    true,
-		RoleGAAdmin:       true,
-		RoleGameAdmin:     true,
-		RoleCompanyAdmin:  true,
-		RoleNormalAdmin:   true,
-		RoleReadonlyAdmin: true,
-	}
-	if !validRoles[role] {
+	if !managerRoles[role] {
 		return errors.New("该用户无权执行此操作")
 	}
 	return nil
@@ -310,6 +321,16 @@ func (l *WKHttp) AuthMiddleware(cache cache.Cache, tokenPrefix string) HandlerFu
 			return
 		}
 		companyCode := c.GetHeader("companyCode")
+		tokenCompany := strings.TrimSpace(uidAndNames[3])
+		if managerRoles[uidAndNames[2]] && tokenCompany != "" {
+			// 后台管理员 token 的值里自带企业号（登录/进入企业时写入），以它为准、忽略请求头。
+			// 否则任一企业管理员改个 companyCode 请求头就能读写别家企业的后台数据（2026-10-10 简语 LY101 事件排查发现）。
+			companyCode = tokenCompany
+		} else if companyCode != "" && tokenCompany != "" && companyCode != tokenCompany {
+			// App 端 token 暂不拦截，先统计请求头与 token 企业号不一致的量（影子模式），确认无正常流量后再收紧
+			authShadowLog.Warn("companyCode请求头与token企业号不一致", zap.String("uid", uidAndNames[0]),
+				zap.String("header", companyCode), zap.String("token_company", tokenCompany), zap.String("path", c.FullPath()))
+		}
 		if companyCode == "" {
 			companyCode = UidCompanyCode(uidAndNames[0])
 		}
