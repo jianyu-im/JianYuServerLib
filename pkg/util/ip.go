@@ -49,19 +49,7 @@ func TrustedProxies() []string {
 				}
 			}
 		}
-		for _, item := range trustedList {
-			cidr := item
-			if !strings.Contains(cidr, "/") {
-				if strings.Contains(cidr, ":") {
-					cidr += "/128"
-				} else {
-					cidr += "/32"
-				}
-			}
-			if _, n, err := net.ParseCIDR(cidr); err == nil {
-				trustedNets = append(trustedNets, n)
-			}
-		}
+		trustedNets = parseNets(trustedList)
 	})
 	return trustedList
 }
@@ -69,11 +57,66 @@ func TrustedProxies() []string {
 // IsTrustedProxy ip 是否为可信代理
 func IsTrustedProxy(ip string) bool {
 	TrustedProxies()
+	return ipInNets(ip, trustedNets)
+}
+
+// defaultProxyProtocolPeers 自家四层代理（nginx stream / docker tcp-proxy）的出口地址：
+// 47.111.89.34 的内网出口 172.30.59.56、103.239.185.115、182.92.242.204、.169 的 game-proxy、高防 210.16.163.9。
+// 只有 TCP 来源是这些地址时监听器才解析 PROXY protocol 头；其余来源一律不解析，直连客户端发 PROXY 头只会得到 400。
+var defaultProxyProtocolPeers = []string{"172.30.59.56", "103.239.185.115", "182.92.242.204", "192.140.173.169", "210.16.163.9"}
+
+var (
+	proxyProtocolOnce sync.Once
+	proxyProtocolNets []*net.IPNet
+)
+
+// ProxyProtocolPeers 允许发 PROXY protocol 头的四层代理，环境变量 JY_PROXY_PROTOCOL_PEERS（逗号分隔 IP 或 CIDR）可整体覆盖，填 off 关闭
+func ProxyProtocolPeers() []*net.IPNet {
+	proxyProtocolOnce.Do(func() {
+		list := defaultProxyProtocolPeers
+		if v := strings.TrimSpace(os.Getenv("JY_PROXY_PROTOCOL_PEERS")); v != "" {
+			list = nil
+			if !strings.EqualFold(v, "off") {
+				list = strings.Split(v, ",")
+			}
+		}
+		proxyProtocolNets = parseNets(list)
+	})
+	return proxyProtocolNets
+}
+
+// IsProxyProtocolPeer ip 是否为允许发 PROXY protocol 头的四层代理
+func IsProxyProtocolPeer(ip string) bool {
+	return ipInNets(ip, ProxyProtocolPeers())
+}
+
+func parseNets(items []string) []*net.IPNet {
+	var nets []*net.IPNet
+	for _, item := range items {
+		cidr := strings.TrimSpace(item)
+		if cidr == "" {
+			continue
+		}
+		if !strings.Contains(cidr, "/") {
+			if strings.Contains(cidr, ":") {
+				cidr += "/128"
+			} else {
+				cidr += "/32"
+			}
+		}
+		if _, n, err := net.ParseCIDR(cidr); err == nil {
+			nets = append(nets, n)
+		}
+	}
+	return nets
+}
+
+func ipInNets(ip string, nets []*net.IPNet) bool {
 	parsed := net.ParseIP(strings.TrimSpace(ip))
 	if parsed == nil {
 		return false
 	}
-	for _, n := range trustedNets {
+	for _, n := range nets {
 		if n.Contains(parsed) {
 			return true
 		}

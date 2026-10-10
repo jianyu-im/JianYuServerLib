@@ -212,9 +212,9 @@ func (l *WKHttp) WKHttpHandler(handlerFunc HandlerFunc) gin.HandlerFunc {
 	}
 }
 
-// Run Run
+// Run 启动 HTTP 服务；来自四层代理（util.ProxyProtocolPeers）的连接会解析 PROXY protocol 头取真实客户端 IP
 func (l *WKHttp) Run(addr ...string) error {
-	return l.r.Run(addr...)
+	return l.runWithProxyProtocol(addr...)
 }
 
 func (l *WKHttp) RunTLS(addr, certFile, keyFile string) error {
