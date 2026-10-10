@@ -10,6 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/jianyu-im/JianYuServerLib/pkg/cache"
 	"github.com/jianyu-im/JianYuServerLib/pkg/log"
+	"github.com/jianyu-im/JianYuServerLib/pkg/util"
 	"github.com/opentracing/opentracing-go"
 	"go.uber.org/zap"
 )
@@ -55,6 +56,11 @@ func New() *WKHttp {
 	l := &WKHttp{
 		r:    gin.New(),
 		pool: sync.Pool{},
+	}
+	// 只采信自家 HTTP 代理传来的 X-Forwarded-For（gin 默认信任所有来源，客户端可伪造 IP）
+	if err := l.r.SetTrustedProxies(util.TrustedProxies()); err != nil {
+		log.Warn("设置可信代理失败，回退为不信任任何代理", zap.Error(err))
+		_ = l.r.SetTrustedProxies(nil)
 	}
 	l.r.Use(gin.Recovery())
 	l.pool.New = func() interface{} {
