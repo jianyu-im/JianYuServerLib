@@ -6,6 +6,7 @@
 package zdb
 
 import (
+	"github.com/jianyu-im/JianYuServerLib/pkg/db"
 	"github.com/jianyu-im/JianYuServerLib/pkg/zlog"
 
 	"github.com/jianyu-im/JianYuServerLib/pkg/zconfig"
@@ -34,7 +35,12 @@ func newDBManager() *dbManager {
 
 	//db初始化连接
 	for name, opt := range dm.opts {
-		engine, err := gorm.Open(mysql.Open(opt.Dns), &gorm.Config{
+		mo := opt.mysqlOptions()
+		dsn, err := db.ApplyMySQLDSNTimeouts(opt.Dns, mo)
+		if err != nil {
+			zlog.Panic("数据库 DSN 解析失败:", err)
+		}
+		engine, err := gorm.Open(mysql.Open(dsn), &gorm.Config{
 			NamingStrategy: schema.NamingStrategy{
 				SingularTable: true,
 			},
@@ -50,13 +56,16 @@ func newDBManager() *dbManager {
 			engine = engine.Debug()
 		}
 
-		db, err := engine.DB()
+		if err := db.RegisterGormStatementTimeout(engine, mo.QueryTimeout); err != nil {
+			zlog.Panic("注册语句超时失败:" + err.Error())
+		}
+
+		sqlDB, err := engine.DB()
 		if err != nil {
 			zlog.Panic("数据库错误:" + err.Error())
 		}
 
-		db.SetMaxOpenConns(opt.MaxOpenConns)
-		db.SetMaxIdleConns(opt.MaxIdleConns)
+		db.ConfigurePool(sqlDB, mo)
 
 		dm.dbs[name] = engine
 	}

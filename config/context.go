@@ -160,7 +160,7 @@ func (c *Context) GetConfig() *Config {
 func (c *Context) NewMySQL() *dbr.Session {
 
 	if c.mySQLSession == nil {
-		c.mySQLSession = db.NewMySQL(c.cfg.DB.MySQLAddr, c.cfg.DB.MySQLMaxOpenConns, c.cfg.DB.MySQLMaxIdleConns, c.cfg.DB.MySQLConnMaxLifetime)
+		c.mySQLSession = db.NewMySQLWithOptions(c.cfg.DB.MySQLAddr, c.cfg.MySQLOptions())
 	}
 
 	return c.mySQLSession

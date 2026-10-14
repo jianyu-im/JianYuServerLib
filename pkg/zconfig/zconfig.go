@@ -13,6 +13,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/jianyu-im/JianYuServerLib/pkg/util/crypt"
 
@@ -192,6 +193,10 @@ func GetInt64(key string) int64 {
 
 func GetInt(key string) int {
 	return conf.GetInt(key)
+}
+
+func GetDuration(key string) time.Duration {
+	return conf.GetDuration(key)
 }
 
 func GetInt32(key string) int32 {

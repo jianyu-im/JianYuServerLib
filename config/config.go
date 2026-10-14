@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jianyu-im/JianYuServerLib/pkg/db"
 	"github.com/jianyu-im/JianYuServerLib/pkg/util"
 	"github.com/spf13/cast"
 	"github.com/spf13/viper"
@@ -104,10 +105,18 @@ type Config struct {
 		MySQLMaxOpenConns    int           // 最大连接数
 		MySQLMaxIdleConns    int           // 最大空闲连接数
 		MySQLConnMaxLifetime time.Duration // 连接最大生命周期
-		Migration            bool          // 是否合并数据库
-		RedisAddr            string        // redis地址
-		RedisPass            string        // redis密码
-		AsynctaskRedisAddr   string        // 异步任务的redis地址 不写默认为RedisAddr的地址
+		MySQLConnMaxIdleTime time.Duration // 空闲连接最长保留时间
+		// 超时（<0 关闭该层；0/不写取默认值，见 pkg/db.DefaultMySQLOptions）
+		MySQLQueryTimeout     time.Duration // dbr 单条语句超时（含排队等连接）
+		MySQLDialTimeout      time.Duration // 建连超时（DSN timeout）
+		MySQLReadTimeout      time.Duration // 网络读超时（DSN readTimeout）
+		MySQLWriteTimeout     time.Duration // 网络写超时（DSN writeTimeout）
+		MySQLMaxExecutionTime time.Duration // 服务端只读 SELECT 执行上限（max_execution_time）
+		MySQLLockWaitTimeout  time.Duration // 服务端行锁等待上限（innodb_lock_wait_timeout）
+		Migration             bool          // 是否合并数据库
+		RedisAddr             string        // redis地址
+		RedisPass             string        // redis密码
+		AsynctaskRedisAddr    string        // 异步任务的redis地址 不写默认为RedisAddr的地址
 	}
 	// ---------- 分布式配置 ----------
 	Cluster struct {
@@ -321,21 +330,35 @@ func New() *Config {
 
 		// ---------- db配置 ----------
 		DB: struct {
-			MySQLAddr            string
-			MySQLMaxOpenConns    int
-			MySQLMaxIdleConns    int
-			MySQLConnMaxLifetime time.Duration
-			Migration            bool
-			RedisAddr            string
-			RedisPass            string
-			AsynctaskRedisAddr   string
+			MySQLAddr             string
+			MySQLMaxOpenConns     int
+			MySQLMaxIdleConns     int
+			MySQLConnMaxLifetime  time.Duration
+			MySQLConnMaxIdleTime  time.Duration
+			MySQLQueryTimeout     time.Duration
+			MySQLDialTimeout      time.Duration
+			MySQLReadTimeout      time.Duration
+			MySQLWriteTimeout     time.Duration
+			MySQLMaxExecutionTime time.Duration
+			MySQLLockWaitTimeout  time.Duration
+			Migration             bool
+			RedisAddr             string
+			RedisPass             string
+			AsynctaskRedisAddr    string
 		}{
-			MySQLAddr:            "root:demo@tcp(127.0.0.1:3306)/test?charset=utf8mb4&parseTime=true",
-			MySQLMaxOpenConns:    100,
-			MySQLMaxIdleConns:    10,
-			MySQLConnMaxLifetime: time.Second * 60 * 60 * 4, //mysql 默认超时时间为 60*60*8=28800 SetConnMaxLifetime设置为小于数据库超时时间即可
-			Migration:            true,
-			RedisAddr:            "127.0.0.1:6379",
+			MySQLAddr:             "root:demo@tcp(127.0.0.1:3306)/test?charset=utf8mb4&parseTime=true",
+			MySQLMaxOpenConns:     100,
+			MySQLMaxIdleConns:     10,
+			MySQLConnMaxLifetime:  time.Second * 60 * 60 * 4, //mysql 默认超时时间为 60*60*8=28800 SetConnMaxLifetime设置为小于数据库超时时间即可
+			MySQLConnMaxIdleTime:  db.DefaultMySQLConnMaxIdleTime,
+			MySQLQueryTimeout:     db.DefaultMySQLQueryTimeout,
+			MySQLDialTimeout:      db.DefaultMySQLDialTimeout,
+			MySQLReadTimeout:      db.DefaultMySQLReadTimeout,
+			MySQLWriteTimeout:     db.DefaultMySQLWriteTimeout,
+			MySQLMaxExecutionTime: db.DefaultMySQLMaxExecutionTime,
+			MySQLLockWaitTimeout:  db.DefaultMySQLLockWaitTimeout,
+			Migration:             true,
+			RedisAddr:             "127.0.0.1:6379",
 		},
 		// ---------- 分布式配置 ----------
 		Cluster: struct {
@@ -585,6 +608,13 @@ func (c *Config) ConfigureWithViper(vp *viper.Viper) {
 	c.DB.MySQLMaxOpenConns = c.getInt("database.default.maxOpenConns", c.DB.MySQLMaxOpenConns)
 	c.DB.MySQLMaxIdleConns = c.getInt("database.default.maxIdleConns", c.DB.MySQLMaxIdleConns)
 	c.DB.MySQLConnMaxLifetime = c.getDuration("db.mysqlConnMaxLifetime", c.DB.MySQLConnMaxLifetime)
+	c.DB.MySQLConnMaxIdleTime = c.getDuration("database.default.connMaxIdleTime", c.DB.MySQLConnMaxIdleTime)
+	c.DB.MySQLQueryTimeout = c.getDuration("database.default.queryTimeout", c.DB.MySQLQueryTimeout)
+	c.DB.MySQLDialTimeout = c.getDuration("database.default.dialTimeout", c.DB.MySQLDialTimeout)
+	c.DB.MySQLReadTimeout = c.getDuration("database.default.readTimeout", c.DB.MySQLReadTimeout)
+	c.DB.MySQLWriteTimeout = c.getDuration("database.default.writeTimeout", c.DB.MySQLWriteTimeout)
+	c.DB.MySQLMaxExecutionTime = c.getDuration("database.default.maxExecutionTime", c.DB.MySQLMaxExecutionTime)
+	c.DB.MySQLLockWaitTimeout = c.getDuration("database.default.lockWaitTimeout", c.DB.MySQLLockWaitTimeout)
 	c.DB.Migration = c.getBool("db.migration", c.DB.Migration)
 	c.DB.RedisAddr = c.getString("redis.addr", c.DB.RedisAddr)
 	c.DB.RedisPass = c.getString("redis.password", c.DB.RedisPass)
@@ -1137,4 +1167,20 @@ func (d *duration) UnmarshalText(text []byte) error {
 	var err error
 	d.Duration, err = time.ParseDuration(string(text))
 	return err
+}
+
+// MySQLOptions 主库（dbr）连接池与超时参数
+func (c *Config) MySQLOptions() db.MySQLOptions {
+	return db.MySQLOptions{
+		MaxOpenConns:     c.DB.MySQLMaxOpenConns,
+		MaxIdleConns:     c.DB.MySQLMaxIdleConns,
+		ConnMaxLifetime:  c.DB.MySQLConnMaxLifetime,
+		ConnMaxIdleTime:  c.DB.MySQLConnMaxIdleTime,
+		QueryTimeout:     c.DB.MySQLQueryTimeout,
+		DialTimeout:      c.DB.MySQLDialTimeout,
+		ReadTimeout:      c.DB.MySQLReadTimeout,
+		WriteTimeout:     c.DB.MySQLWriteTimeout,
+		MaxExecutionTime: c.DB.MySQLMaxExecutionTime,
+		LockWaitTimeout:  c.DB.MySQLLockWaitTimeout,
+	}
 }
