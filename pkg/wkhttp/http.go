@@ -326,10 +326,21 @@ func (l *WKHttp) AuthMiddleware(cache cache.Cache, tokenPrefix string) HandlerFu
 			// 后台管理员 token 的值里自带企业号（登录/进入企业时写入），以它为准、忽略请求头。
 			// 否则任一企业管理员改个 companyCode 请求头就能读写别家企业的后台数据（2026-10-10 简语 LY101 事件排查发现）。
 			companyCode = tokenCompany
-		} else if companyCode != "" && tokenCompany != "" && companyCode != tokenCompany {
-			// App 端 token 暂不拦截，先统计请求头与 token 企业号不一致的量（影子模式），确认无正常流量后再收紧
-			authShadowLog.Warn("companyCode请求头与token企业号不一致", zap.String("uid", uidAndNames[0]),
-				zap.String("header", companyCode), zap.String("token_company", tokenCompany), zap.String("path", c.FullPath()))
+		} else if !managerRoles[uidAndNames[2]] {
+			// App 端同样以 token 为准（2026-10-21 收紧，此前是只记日志的影子模式）：改 companyCode 请求头就能以别家企业身份
+			// 拉通讯录、查在线用户、按手机号搜人，再配合建群跨企业拉人（2026-09-03 F3823「V9证据」群）。
+			// token 没写企业号的老 token 按 uid 前缀推导；不带 "code" 的系统账号仍用请求头。
+			appCompany := tokenCompany
+			if appCompany == "" && strings.Contains(uidAndNames[0], "code") {
+				appCompany = UidCompanyCode(uidAndNames[0])
+			}
+			if appCompany != "" {
+				if companyCode != "" && !strings.EqualFold(companyCode, appCompany) {
+					authShadowLog.Warn("companyCode请求头与token企业号不一致，已按token企业处理", zap.String("uid", uidAndNames[0]),
+						zap.String("header", companyCode), zap.String("token_company", appCompany), zap.String("path", c.FullPath()))
+				}
+				companyCode = appCompany
+			}
 		}
 		if companyCode == "" {
 			companyCode = UidCompanyCode(uidAndNames[0])
