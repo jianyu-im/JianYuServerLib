@@ -38,6 +38,9 @@ type Context struct {
 
 	httpRouter *wkhttp.WKHttp
 
+	renewerOnce sync.Once // token 滑动续期（token_renew.go）
+	renewer     *tokenRenewer
+
 	valueMap  sync.Map
 	SetupTask bool // 是否安装task
 
@@ -205,7 +208,7 @@ func (c *Context) Cache() cache.Cache {
 // 认证中间件
 func (c *Context) AuthMiddleware(r *wkhttp.WKHttp) wkhttp.HandlerFunc {
 
-	return r.AuthMiddleware(c.Cache(), c.cfg.Cache.TokenCachePrefix)
+	return r.AuthMiddlewareWithRenewer(c.Cache(), c.cfg.Cache.TokenCachePrefix, c.tokenRenewer())
 }
 
 // GetRedisConn GetRedisConn

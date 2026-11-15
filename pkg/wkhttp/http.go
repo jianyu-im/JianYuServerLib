@@ -286,6 +286,22 @@ func (l *WKHttp) handlersToGinHandleFuncs(handlers []HandlerFunc) []gin.HandlerF
 
 // AuthMiddleware 认证中间件
 func (l *WKHttp) AuthMiddleware(cache cache.Cache, tokenPrefix string) HandlerFunc {
+	return l.AuthMiddlewareWithRenewer(cache, tokenPrefix, nil)
+}
+
+// TokenRenewer 鉴权通过后的 token 续期钩子（滑动过期）。实现方必须自行节流且不能阻塞请求。
+type TokenRenewer interface {
+	Renew(token string, uid string)
+}
+
+// IsManagerRole 后台管理员角色（含老角色 admin/superAdmin）。后台会话不做滑动续期，保持登录后固定时长失效。
+func IsManagerRole(role string) bool {
+	return managerRoles[role] || role == string(Admin) || role == string(SuperAdmin)
+}
+
+// AuthMiddlewareWithRenewer 同 AuthMiddleware，鉴权通过且是 App/网页/PC 用户 token 时调用 renewer 续期。
+// 2026-11-15：此前 token 只在登录时写 30 天 TTL、使用中从不续期，活跃用户每满 30 天被强制退出一次。
+func (l *WKHttp) AuthMiddlewareWithRenewer(cache cache.Cache, tokenPrefix string, renewer TokenRenewer) HandlerFunc {
 
 	return func(c *Context) {
 		token := c.GetHeader("token")
@@ -356,6 +372,10 @@ func (l *WKHttp) AuthMiddleware(cache cache.Cache, tokenPrefix string) HandlerFu
 		c.Set("name", uidAndNames[1])
 		c.Set("role", uidAndNames[2])
 		c.Set("companyCode", companyCode)
+
+		if renewer != nil && !IsManagerRole(uidAndNames[2]) {
+			renewer.Renew(token, uidAndNames[0])
+		}
 
 		c.Next()
 	}
